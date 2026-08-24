@@ -6,9 +6,9 @@ A high-performance, real-time Steem curation trail dashboard. This tool allows u
 
 - **Live Steem Blockchain Streaming**: Streams blocks in real time and automatically dispatches votes on behalf of followers within seconds.
 - **Real-time Dashboard**: WebSocket-powered React frontend that pushes live Voting Power and vote logs directly to your screen without heavy API polling.
-- **Dual Authentication Modes**:
-  - **Steem Keychain**: 1-click login and secure vote dispatching without ever storing your keys on our server.
-  - **Authority Mode**: Grant the bot account `posting` authority to vote seamlessly in the background 24/7.
+- **Dual Authentication Modes (Zero-Knowledge)**:
+  - **Steem Keychain**: 1-click login and secure vote dispatching without ever exposing keys.
+  - **Active Key (Local Sign)**: Grant the bot account `posting` authority to vote seamlessly in the background 24/7. Your Active Key is processed purely in the browser and is never sent to the server.
 - **Multiple Trail Support**: Follow multiple trail leaders concurrently. Customize your vote weight (%), time delay (minutes), and minimum Voting Power threshold.
 - **Responsive UI**: Clean, modern dark-mode dashboard fully optimized for mobile devices and wide screens.
 
@@ -47,9 +47,6 @@ BOT_ACCOUNT="your_bot_account_name"
 
 # Private POSTING key for the bot account
 BOT_POSTING_KEY="5J..."
-
-# Encryption key for securing any locally stored WIFs
-ENCRYPTION_KEY="your_secure_random_string_here"
 ```
 
 ### 3. Run the App
@@ -80,14 +77,12 @@ docker build -t steem-curation-trial .
 
 ### 2. Run the Container
 
-You can pass your environment variables directly into the container. Note that we map port `5000` because the Node server hosts both the API and the static React build.
+You can pass your environment variables directly into the container using your `.env` file. Note that we map port `5000` because the Node server hosts both the API and the static React build.
 
 ```bash
 docker run -d \
   -p 5000:5000 \
-  -e BOT_ACCOUNT="your_bot_account_name" \
-  -e BOT_POSTING_KEY="5J..." \
-  -e ENCRYPTION_KEY="your_secure_random_string_here" \
+  --env-file .env \
   --name curation-trial \
   steem-curation-trial
 ```
