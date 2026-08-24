@@ -524,7 +524,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
                   id="login-postingkey-input"
                   type="password"
                   className="form-input"
-                  placeholder="5K..."
+                  placeholder="5J..."
                   value={postingKey}
                   onChange={(e) => setPostingKey(e.target.value)}
                   required={authMethod === 'key'}
