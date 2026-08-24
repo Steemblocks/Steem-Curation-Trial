@@ -3,8 +3,8 @@ dotenv.config();
 
 const SECRET         = process.env.ENCRYPTION_KEY || 'dhaka_curation_trial_secret_2026';
 export const BOT_ACCOUNT    = (process.env.BOT_ACCOUNT    || '').toLowerCase();
-export const BOT_POSTING_KEY = process.env.BOT_POSTING_KEY || '';
-export const TRAIL_LEADER    = (process.env.TRAIL_LEADER   || 'dhaka.witness').toLowerCase();
+export const BOT_POSTING_KEY = (process.env.BOT_POSTING_KEY || '').trim();
+export const TRAIL_LEADER    = (process.env.TRAIL_LEADER   || 'dhaka.witness').toLowerCase().trim();
 
 // ── Steem RPC nodes (with automated failover) ─────────────────────────────────
 const NODES = [
@@ -15,8 +15,8 @@ const NODES = [
   'https://steem.bts.tw',
 ];
 let ni = 0;
-const node = () => NODES[ni];
-const rotate = () => { ni = (ni + 1) % NODES.length; };
+export const node = () => NODES[ni];
+export const rotate = () => { ni = (ni + 1) % NODES.length; };
 
 // ── Raw JSON-RPC call ─────────────────────────────────────────────────────────
 export async function rpc(method, params = []) {
@@ -107,7 +107,7 @@ export async function getBlock(blockNum) {
 
 // ── steem-js lazy loader ──────────────────────────────────────────────────────
 let _steem = null;
-async function steemJs() {
+export async function steemJs() {
   if (!_steem) {
     const m = await import('steem');
     _steem = m.default ?? m;
@@ -127,7 +127,7 @@ export async function hasBotAuthority(username) {
 }
 
 /**
- * Cast a vote ON BEHALF OF `voter` using the bot's own posting key.
+ * Cast a vote ON BEHALF OF `voter` using the bot's own posting key with node failover.
  *
  * @param {string} voter    - The enrolled user account casting the vote
  * @param {string} author   - Post author
@@ -135,17 +135,58 @@ export async function hasBotAuthority(username) {
  * @param {number} weight   - Vote weight 1-100 (%)
  */
 export async function voteOnBehalf({ voter, author, permlink, weight }) {
-  if (!BOT_POSTING_KEY) throw new Error('BOT_POSTING_KEY not set in .env');
+  const key = (BOT_POSTING_KEY || '').trim();
+  if (!key) throw new Error('BOT_POSTING_KEY not configured in .env');
+
   const steemWeight = Math.round(Math.min(100, Math.max(1, weight)) * 100);
   const s = await steemJs();
-  s.api.setOptions({ url: node() });
 
-  return new Promise(resolve => {
-    s.broadcast.vote(BOT_POSTING_KEY, voter, author, permlink, steemWeight, (err, result) => {
-      if (err) resolve({ success: false, error: err.message || String(err) });
-      else     resolve({ success: true,  txId: result?.id ?? 'ok' });
-    });
-  });
+  // Attempt broadcast with automated node failover
+  let lastError = null;
+  for (let attempt = 0; attempt < NODES.length; attempt++) {
+    try {
+      const currentNode = node();
+      s.api.setOptions({ url: currentNode });
+
+      const res = await new Promise((resolve) => {
+        s.broadcast.vote(key, voter, author, permlink, steemWeight, (err, result) => {
+          if (err) {
+            resolve({ success: false, error: err.message || String(err) });
+          } else {
+            resolve({ success: true, txId: result?.id || 'broadcast_ok' });
+          }
+        });
+      });
+
+      if (res.success) {
+        return res;
+      }
+
+      // If it's a permanent error from the blockchain (not a node network issue), don't failover
+      const errMsg = res.error || '';
+      if (
+        errMsg.includes('identical to this vote') ||
+        errMsg.includes('STEEM_MIN_VOTE_INTERVAL_SEC') ||
+        errMsg.includes('Can only vote once every 3 seconds') ||
+        errMsg.includes('missing required posting authority') ||
+        errMsg.includes('author') ||
+        errMsg.includes('permlink')
+      ) {
+        return res;
+      }
+
+      // If network/RPC issue, rotate node and try again
+      lastError = errMsg;
+      rotate();
+      await new Promise(r => setTimeout(r, 400));
+    } catch (e) {
+      lastError = e.message || String(e);
+      rotate();
+      await new Promise(r => setTimeout(r, 400));
+    }
+  }
+
+  return { success: false, error: lastError || 'Broadcast failed across all RPC nodes' };
 }
 
 

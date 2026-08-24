@@ -9,7 +9,7 @@ dotenv.config();
 import {
   initDb, getAllUsers, getUser, upsertUserAccount,
   getUserTrails, addUserTrail, updateUserTrail, deleteUserTrail,
-  updateUserStatus, deleteUser, getVoteLogs, getVoteStats
+  updateUserStatus, deleteUser, getVoteLogs, getTotalVoteLogsCount, getVoteStats
 } from './db.js';
 import { getAccount, calcVP, formatRep, hasBotAuthority, BOT_ACCOUNT } from './steemClient.js';
 import { startStreamer, getSyncedBlock, getWatchedSet, refreshWatched, simulateVote } from './steemStreamer.js';
@@ -104,8 +104,22 @@ app.get('/api/status', async (req, res) => {
 // Logs
 app.get('/api/logs', (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 30, 200);
-    res.json({ success: true, logs: getVoteLogs(limit) });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 100), 200);
+    const offset = req.query.offset !== undefined ? parseInt(req.query.offset, 10) : (page - 1) * limit;
+
+    const total = getTotalVoteLogsCount();
+    const logs = getVoteLogs({ limit, offset });
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    res.json({
+      success: true,
+      logs,
+      total,
+      page,
+      limit,
+      totalPages
+    });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 

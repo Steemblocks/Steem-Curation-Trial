@@ -1,15 +1,19 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH   = process.env.DB_PATH || path.join(__dirname, 'curation_trial.db');
+let dbPath = process.env.DB_PATH;
+if (!dbPath || !fs.existsSync(path.dirname(path.resolve(dbPath)))) {
+  dbPath = path.join(__dirname, 'curation_trial.db');
+}
 
-const db = new Database(DB_PATH);
+const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
-console.log('[DB] Connected:', DB_PATH);
+console.log('[DB] Connected:', dbPath);
 
 export function initDb() {
   // Users table — stores user authentication & global status
@@ -226,8 +230,18 @@ export function logVote({ leader, author, permlink, voter, weight, status, txId 
   `).run(leader, author, permlink, voter, weight, status, txId, error);
 }
 
-export function getVoteLogs(limit = 50) {
-  return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC LIMIT ?`).all(limit);
+export function getVoteLogs({ limit = 50, offset = 0 } = {}) {
+  // Support either getVoteLogs(50) or getVoteLogs({ limit: 50, offset: 0 })
+  if (typeof limit === 'number' && typeof offset === 'number') {
+    return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`).all(limit, offset);
+  }
+  const lim = typeof limit === 'object' ? (limit.limit || 50) : 50;
+  const off = typeof limit === 'object' ? (limit.offset || 0) : 0;
+  return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`).all(lim, off);
+}
+
+export function getTotalVoteLogsCount() {
+  return db.prepare(`SELECT COUNT(*) c FROM vote_logs`).get()?.c ?? 0;
 }
 
 export function getVoteStats() {

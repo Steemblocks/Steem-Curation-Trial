@@ -17,7 +17,9 @@ import {
   Plus,
   X,
   UserCheck,
-  Edit2
+  Edit2,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 
 // ── API Helpers ─────────────────────────────────────────────────────────────
@@ -826,6 +828,28 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const [editDelay, setEditDelay] = useState(0);
   const [editMinVp, setEditMinVp] = useState(80);
 
+  // Pagination & Refresh state for Recent Vote Activity
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const logsPerPage = 10;
+
+  const totalLogs = logs.length;
+  const totalPages = Math.max(1, Math.ceil(totalLogs / logsPerPage));
+  const validPage = Math.min(currentPage, totalPages);
+  const startIndex = (validPage - 1) * logsPerPage;
+  const currentLogs = logs.slice(startIndex, startIndex + logsPerPage);
+
+  const handleRefreshClick = async () => {
+    setIsRefreshing(true);
+    try {
+      await onRefresh();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 500);
+    }
+  };
+
   const vp = steemProfile?.votingPower || 95;
   const isAccountActive = user?.status === 'active';
 
@@ -1090,21 +1114,6 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
       }
     } finally {
       setModalProcessing(false);
-    }
-  };
-
-  const handleSimulateVote = async (leaderAccount) => {
-    try {
-      await post('/simulate-vote', {
-        leader: leaderAccount || 'dhaka.witness',
-        author: 'steemit',
-        permlink: 'test-' + Date.now(),
-        weight: 100
-      });
-      onRefresh();
-      showNotification(`Simulated vote event by @${leaderAccount || 'dhaka.witness'}`);
-    } catch (err) {
-      showNotification('Failed to trigger simulation.', true);
     }
   };
 
@@ -1414,74 +1423,109 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
           </div>
 
           <div className="header-actions" style={{ gap: '0.5rem' }}>
-            {trails.length > 0 && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => handleSimulateVote(trails[0]?.trail_account)}
-                title="Test trial dispatch"
-              >
-                Simulate Vote
-              </button>
-            )}
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              onClick={onRefresh}
+              onClick={handleRefreshClick}
+              disabled={isRefreshing}
               title="Refresh Logs"
             >
-              <RefreshCw size={13} />
+              <RefreshCw size={13} className={isRefreshing ? 'spin-active' : ''} />
+              <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
             </button>
           </div>
         </div>
 
-        {logs.length === 0 ? (
+        {totalLogs === 0 ? (
           <div style={{ textAlign: 'center', padding: '2rem 1rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
             No vote activity recorded yet. Votes from your followed trail accounts will appear here automatically.
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Trail Leader</th>
-                  <th>Target Post</th>
-                  <th>Voter</th>
-                  <th>Weight</th>
-                  <th>Status</th>
-                  <th>Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {logs.map((log) => (
-                  <tr key={log.id}>
-                    <td>
-                      <span style={{ fontWeight: '600' }}>@{log.leader}</span>
-                    </td>
-                    <td>
-                      <a
-                        href={`https://steemit.com/@${log.author}/${log.permlink}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ color: 'var(--color-primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
-                      >
-                        @{log.author}/{log.permlink.length > 20 ? log.permlink.substring(0, 20) + '...' : log.permlink}
-                        <ExternalLink size={11} color="var(--text-muted)" />
-                      </a>
-                    </td>
-                    <td>@{log.voter}</td>
-                    <td>{log.weight}%</td>
-                    <td>
-                      <VoteStatusBadge status={log.status} />
-                    </td>
-                    <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      {new Date(log.timestamp + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </td>
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Trail Leader</th>
+                    <th>Target Post</th>
+                    <th>Voter</th>
+                    <th>Weight</th>
+                    <th>Status</th>
+                    <th>Time</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {currentLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td>
+                        <span style={{ fontWeight: '600' }}>@{log.leader}</span>
+                      </td>
+                      <td>
+                        <a
+                          href={`https://steemit.com/@${log.author}/${log.permlink}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--color-primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                        >
+                          @{log.author}/{log.permlink.length > 20 ? log.permlink.substring(0, 20) + '...' : log.permlink}
+                          <ExternalLink size={11} color="var(--text-muted)" />
+                        </a>
+                      </td>
+                      <td>@{log.voter}</td>
+                      <td>{log.weight}%</td>
+                      <td>
+                        <VoteStatusBadge status={log.status} />
+                      </td>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                        {new Date(log.timestamp + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            {totalLogs > logsPerPage && (
+              <div className="pagination-container">
+                <div className="pagination-info">
+                  Showing {startIndex + 1} to {Math.min(startIndex + logsPerPage, totalLogs)} of {totalLogs} votes
+                </div>
+                <div className="pagination-controls">
+                  <button
+                    type="button"
+                    className="page-btn"
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={validPage === 1}
+                    title="Previous Page"
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
+                    <button
+                      key={pageNum}
+                      type="button"
+                      className={`page-btn ${pageNum === validPage ? 'active' : ''}`}
+                      onClick={() => setCurrentPage(pageNum)}
+                    >
+                      {pageNum}
+                    </button>
+                  ))}
+
+                  <button
+                    type="button"
+                    className="page-btn"
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={validPage === totalPages}
+                    title="Next Page"
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
