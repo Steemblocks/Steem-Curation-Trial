@@ -1199,7 +1199,7 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                 )}
               </div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                Reputation {steemProfile?.reputation ?? 25} · Auth Mode: {user.auth_type === 'authority' ? 'Posting Authority' : 'Posting Key'}
+                Reputation {steemProfile?.reputation ?? 25} · Auth Mode: Posting Authority
               </div>
             </div>
           </div>

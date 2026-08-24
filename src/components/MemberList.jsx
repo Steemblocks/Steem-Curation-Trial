@@ -57,7 +57,7 @@ export default function MemberList({ members }) {
                   </td>
                   <td>
                     <span className="badge badge-info" style={{ fontSize: '0.75rem' }}>
-                      <Shield size={11} /> {member.auth_type === 'keychain' ? 'Keychain' : 'Key Encrypted'}
+                      <Shield size={11} /> Posting Authority
                     </span>
                   </td>
                   <td>

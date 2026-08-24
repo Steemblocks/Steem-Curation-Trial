@@ -189,8 +189,6 @@ export function getActiveFollowers(trailAccount) {
   return db.prepare(`
     SELECT 
       u.username,
-      u.posting_key_encrypted,
-      u.auth_type,
       t.id as trail_id,
       t.trail_account,
       t.weight,
