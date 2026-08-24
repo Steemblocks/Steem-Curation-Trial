@@ -1589,7 +1589,7 @@ export default function App() {
     if (wsRef.current && wsRef.current.readyState <= 1) return; // already open/connecting
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.hostname}:5000/ws`;
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
