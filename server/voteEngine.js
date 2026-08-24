@@ -1,6 +1,6 @@
 import { getActiveFollowers, logVote }                              from './db.js';
 import { getAccount, calcVP, hasBotAuthority,
-         voteOnBehalf, voteWithKey, decryptKey, BOT_ACCOUNT }       from './steemClient.js';
+         voteOnBehalf, BOT_ACCOUNT }       from './steemClient.js';
 
 /**
  * Fan out a detected leader vote to all active subscribers following that leader.
@@ -19,7 +19,7 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
 }
 
 async function executeVote({ user, leader, author, permlink, leaderWeight }) {
-  const { username, posting_key_encrypted, auth_type, weight: userWeight, min_vp } = user;
+  const { username, weight: userWeight, min_vp } = user;
   // Scale user's weight % against leader's actual weight
   const effectiveWeight = Math.max(1, Math.round((userWeight / 100) * leaderWeight));
 
@@ -35,31 +35,16 @@ async function executeVote({ user, leader, author, permlink, leaderWeight }) {
       return log(leader, author, permlink, username, effectiveWeight, 'SKIPPED_VP', `VP ${vp.toFixed(1)}% < ${min_vp}%`);
     }
 
-    let result;
-
-    // 2a. Authority mode: bot votes on behalf of user
-    if (auth_type === 'authority') {
-      if (!BOT_ACCOUNT) {
-        return log(leader, author, permlink, username, effectiveWeight, 'FAILED', 'BOT_ACCOUNT not set in .env');
-      }
-      const authorized = await hasBotAuthority(username);
-      if (!authorized) {
-        return log(leader, author, permlink, username, effectiveWeight, 'FAILED',
-          `@${BOT_ACCOUNT} not in posting_auths of @${username} — authority revoked?`);
-      }
-      result = await voteOnBehalf({ voter: username, author, permlink, weight: effectiveWeight });
+    // 2. Vote on behalf of user
+    if (!BOT_ACCOUNT) {
+      return log(leader, author, permlink, username, effectiveWeight, 'FAILED', 'BOT_ACCOUNT not set in .env');
     }
-
-    // 2b. Posting key mode
-    else if (auth_type === 'key') {
-      const wif = decryptKey(posting_key_encrypted);
-      if (!wif) return log(leader, author, permlink, username, effectiveWeight, 'FAILED', 'Key decryption failed');
-      result = await voteWithKey({ wif, voter: username, author, permlink, weight: effectiveWeight });
+    const authorized = await hasBotAuthority(username);
+    if (!authorized) {
+      return log(leader, author, permlink, username, effectiveWeight, 'FAILED',
+        `@${BOT_ACCOUNT} not in posting_auths of @${username} — authority revoked?`);
     }
-
-    else {
-      return log(leader, author, permlink, username, effectiveWeight, 'SKIPPED_KEYCHAIN', 'No server-side key or authority');
-    }
+    const result = await voteOnBehalf({ voter: username, author, permlink, weight: effectiveWeight });
 
     // 3. Log result
     if (result.success) {

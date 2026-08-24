@@ -378,10 +378,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
 
         // Keychain signature proves identity — proceed to login
         // Authority grant is handled in the dashboard, not during login
-        const loginRes = await post('/login', {
-          username: cleanUser,
-          authType: 'authority',
-        });
+        const loginRes = await post('/login', { username: cleanUser });
 
         if (loginRes.success) {
           onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
@@ -389,7 +386,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
           setError(loginRes.error || 'Failed to authenticate.');
         }
       } 
-      // 3. Handle Posting Key Auth Flow
+      // 3. Handle Posting Key Auth Flow (ZERO-KNOWLEDGE)
       else {
         if (!postingKey.trim()) {
           setLoading(false);
@@ -397,16 +394,28 @@ function LoginWall({ botAccount, onAuthenticated }) {
           return;
         }
 
-        const loginRes = await post('/login', {
-          username: cleanUser,
-          authType: 'key',
-          postingKey: postingKey.trim(),
-        });
+        try {
+          const pubWif = window.steem.auth.wifToPublic(postingKey.trim());
+          const keyAuths = userCheck.steemProfile.posting.key_auths || [];
+          const isValid = keyAuths.some(([pubKey]) => pubKey === pubWif);
+          if (!isValid) {
+            setLoading(false);
+            setError('Invalid posting key. The key does not match the posting key for this account.');
+            return;
+          }
+        } catch (e) {
+          setLoading(false);
+          setError('Invalid Private Posting Key format.');
+          return;
+        }
+
+        // Key is verified locally, just tell the server we are logged in
+        const loginRes = await post('/login', { username: cleanUser });
 
         if (loginRes.success) {
           onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
         } else {
-          setError(loginRes.error || 'Failed to authenticate with posting key.');
+          setError(loginRes.error || 'Failed to authenticate session.');
         }
       }
     } catch (err) {
@@ -437,10 +446,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
         return;
       }
 
-      const loginRes = await post('/login', {
-        username: cleanUser,
-        authType: 'authority',
-      });
+      const loginRes = await post('/login', { username: cleanUser });
 
       if (loginRes.success) {
         onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
@@ -876,21 +882,43 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const handleConfirmGrantActiveKey = async (activeKey, setError) => {
     setModalProcessing(true);
     try {
-      const res = await post('/grant-authority', { username: user.username, activeKey });
-      if (res.success) {
-        showNotification(`Posting authority granted to @${botAccount}. Trail voting is now active.`);
-        setShowAuthorityModal(null);
-        onRefresh();
-      } else {
-        const errorMsg = res.error || '';
-        if (errorMsg.includes('missing required active authority') || errorMsg.includes('Invalid WIF')) {
-          setError('Invalid Private Active Key provided. Please check your key and try again.');
-        } else {
-          setError(errorMsg || 'Failed to grant authority with Active Key.');
-        }
-      }
+      const existingAuths = (user.posting?.account_auths ?? [])
+        .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase());
+
+      const newPosting = {
+        weight_threshold: user.posting?.weight_threshold || 1,
+        account_auths: [...existingAuths, [botAccount, 1]].sort((a, b) => a[0].localeCompare(b[0])),
+        key_auths: user.posting?.key_auths || [],
+      };
+
+      window.steem.api.setOptions({ url: 'https://api.steemit.com' });
+      
+      await new Promise((resolve, reject) => {
+        window.steem.broadcast.accountUpdate(
+          activeKey,
+          user.username,
+          undefined,
+          undefined,
+          newPosting,
+          user.memoKey,
+          user.jsonMetadata || '',
+          (err, result) => {
+            if (err) reject(err);
+            else resolve(result);
+          }
+        );
+      });
+
+      showNotification(`Posting authority granted to @${botAccount}. Trail voting is now active.`);
+      setShowAuthorityModal(null);
+      onRefresh();
     } catch (err) {
-      setError('Network error during authority grant.');
+      const errorMsg = err.message || String(err);
+      if (errorMsg.includes('missing required active authority') || errorMsg.includes('Invalid WIF')) {
+        setError('Invalid Private Active Key provided. Please check your key and try again.');
+      } else {
+        setError(errorMsg || 'Failed to grant authority with Active Key.');
+      }
     } finally {
       setModalProcessing(false);
     }
@@ -1025,21 +1053,41 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const handleConfirmRevokeActiveKey = async (activeKey, setError) => {
     setModalProcessing(true);
     try {
-      const res = await post('/revoke-authority', { username: user.username, activeKey });
-      if (res.success) {
-        showNotification(`Posting authority revoked from @${botAccount}.`);
-        setShowAuthorityModal(null);
-        onRefresh();
-      } else {
-        const errorMsg = res.error || '';
-        if (errorMsg.includes('missing required active authority') || errorMsg.includes('Invalid WIF')) {
-          setError('Invalid Private Active Key provided. Please check your key and try again.');
-        } else {
-          setError(errorMsg || 'Failed to revoke authority with Active Key.');
-        }
-      }
+      const newPosting = {
+        weight_threshold: user.posting?.weight_threshold || 1,
+        account_auths: (user.posting?.account_auths ?? [])
+          .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase()),
+        key_auths: user.posting?.key_auths || [],
+      };
+
+      window.steem.api.setOptions({ url: 'https://api.steemit.com' });
+
+      await new Promise((resolve, reject) => {
+        window.steem.broadcast.accountUpdate(
+          activeKey,
+          user.username,
+          undefined,
+          undefined,
+          newPosting,
+          user.memoKey,
+          user.jsonMetadata || '',
+          (err, result) => {
+            if (err) reject(err);
+            else resolve(result);
+          }
+        );
+      });
+
+      showNotification(`Posting authority revoked from @${botAccount}.`);
+      setShowAuthorityModal(null);
+      onRefresh();
     } catch (err) {
-      setError('Network error during authority revocation.');
+      const errorMsg = err.message || String(err);
+      if (errorMsg.includes('missing required active authority') || errorMsg.includes('Invalid WIF')) {
+        setError('Invalid Private Active Key provided. Please check your key and try again.');
+      } else {
+        setError(errorMsg || 'Failed to revoke authority with Active Key.');
+      }
     } finally {
       setModalProcessing(false);
     }

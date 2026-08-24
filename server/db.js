@@ -14,8 +14,6 @@ export function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       username              TEXT PRIMARY KEY,
-      posting_key_encrypted TEXT,
-      auth_type             TEXT NOT NULL DEFAULT 'authority',
       status                TEXT NOT NULL DEFAULT 'active',
       created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -84,31 +82,29 @@ export function initDb() {
 // ── User account methods ──────────────────────────────────────────────────────
 
 export function getUser(username) {
-  return db.prepare(`SELECT username, posting_key_encrypted, auth_type, status, created_at, updated_at FROM users WHERE username = ?`).get(username.toLowerCase());
+  return db.prepare(`SELECT username, status, created_at, updated_at FROM users WHERE username = ?`).get(username.toLowerCase());
 }
 
 export function getAllUsers() {
-  return db.prepare(`SELECT username, auth_type, status, created_at FROM users ORDER BY created_at DESC`).all();
+  return db.prepare(`SELECT username, status, created_at FROM users ORDER BY created_at DESC`).all();
 }
 
-export function upsertUserAccount({ username, postingKeyEncrypted, authType = 'authority' }) {
+export function upsertUserAccount({ username }) {
   const u = username.trim().toLowerCase();
   const existing = getUser(u);
 
   if (existing) {
     db.prepare(`
       UPDATE users SET
-        posting_key_encrypted = COALESCE(?, posting_key_encrypted),
-        auth_type             = ?,
         status                = 'active',
         updated_at            = CURRENT_TIMESTAMP
       WHERE username = ?
-    `).run(postingKeyEncrypted ?? null, authType, u);
+    `).run(u);
   } else {
     db.prepare(`
-      INSERT INTO users (username, posting_key_encrypted, auth_type, status)
-      VALUES (?, ?, ?, 'active')
-    `).run(u, postingKeyEncrypted ?? null, authType);
+      INSERT INTO users (username, status)
+      VALUES (?, 'active')
+    `).run(u);
   }
   return getUser(u);
 }

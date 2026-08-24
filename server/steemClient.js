@@ -1,4 +1,3 @@
-import CryptoJS from 'crypto-js';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -128,24 +127,6 @@ export async function hasBotAuthority(username) {
 }
 
 /**
- * Verify a WIF private posting key against the account's on-chain posting public keys.
- * Returns true only if the derived public key matches one in posting.key_auths.
- */
-export async function verifyPostingKey(username, wif) {
-  try {
-    const s = await steemJs();
-    const derivedPubKey = s.auth.wifToPublic(wif);
-    const acc = await getAccount(username);
-    if (!acc) return false;
-    const keyAuths = acc.posting?.key_auths ?? [];
-    return keyAuths.some(([pubKey]) => pubKey === derivedPubKey);
-  } catch (e) {
-    // wifToPublic throws on invalid WIF format
-    return false;
-  }
-}
-
-/**
  * Cast a vote ON BEHALF OF `voter` using the bot's own posting key.
  *
  * @param {string} voter    - The enrolled user account casting the vote
@@ -167,101 +148,5 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
   });
 }
 
-/**
- * Fallback: vote using the user's own stored (decrypted) posting key.
- */
-export async function voteWithKey({ wif, voter, author, permlink, weight }) {
-  if (!wif) throw new Error('No posting key available');
-  const steemWeight = Math.round(Math.min(100, Math.max(1, weight)) * 100);
-  const s = await steemJs();
-  s.api.setOptions({ url: node() });
 
-  return new Promise(resolve => {
-    s.broadcast.vote(wif, voter, author, permlink, steemWeight, (err, result) => {
-      if (err) resolve({ success: false, error: err.message || String(err) });
-      else     resolve({ success: true,  txId: result?.id ?? 'ok' });
-    });
-  });
-}
-
-/**
- * Grant posting authority to BOT_ACCOUNT using user's private active key.
- * Broadcasts account_update to add BOT_ACCOUNT to posting.account_auths.
- * The active key is NOT stored — used only for this single broadcast.
- */
-export async function grantAuthorityWithActiveKey({ username, activeKey }) {
-  const acc = await getAccount(username);
-  if (!acc) throw new Error(`Account @${username} not found on blockchain`);
-
-  const existingAuths = (acc.posting?.account_auths ?? [])
-    .filter(([a]) => a.toLowerCase() !== BOT_ACCOUNT.toLowerCase());
-
-  const newPosting = {
-    weight_threshold: acc.posting?.weight_threshold || 1,
-    account_auths: [...existingAuths, [BOT_ACCOUNT, 1]].sort((a, b) => a[0].localeCompare(b[0])),
-    key_auths: acc.posting?.key_auths || [],
-  };
-
-  const s = await steemJs();
-  s.api.setOptions({ url: node() });
-
-  return new Promise(resolve => {
-    s.broadcast.accountUpdate(
-      activeKey,
-      username,
-      undefined,       // owner — don't change
-      undefined,       // active — don't change
-      newPosting,      // posting — updated with bot authority
-      acc.memo_key,
-      acc.json_metadata || '',
-      (err, result) => {
-        if (err) resolve({ success: false, error: err.message || String(err) });
-        else     resolve({ success: true, txId: result?.id ?? 'ok' });
-      }
-    );
-  });
-}
-
-/**
- * Revoke posting authority from BOT_ACCOUNT using user's private active key.
- */
-export async function revokeAuthorityWithActiveKey({ username, activeKey }) {
-  const acc = await getAccount(username);
-  if (!acc) throw new Error(`Account @${username} not found on blockchain`);
-
-  const newPosting = {
-    weight_threshold: acc.posting?.weight_threshold || 1,
-    account_auths: (acc.posting?.account_auths ?? [])
-      .filter(([a]) => a.toLowerCase() !== BOT_ACCOUNT.toLowerCase()),
-    key_auths: acc.posting?.key_auths || [],
-  };
-
-  const s = await steemJs();
-  s.api.setOptions({ url: node() });
-
-  return new Promise(resolve => {
-    s.broadcast.accountUpdate(
-      activeKey,
-      username,
-      undefined,
-      undefined,
-      newPosting,
-      acc.memo_key,
-      acc.json_metadata || '',
-      (err, result) => {
-        if (err) resolve({ success: false, error: err.message || String(err) });
-        else     resolve({ success: true, txId: result?.id ?? 'ok' });
-      }
-    );
-  });
-}
-
-// ── AES encrypt / decrypt ─────────────────────────────────────────────────────
-export function encryptKey(plain) {
-  return plain ? CryptoJS.AES.encrypt(plain.trim(), SECRET).toString() : null;
-}
-export function decryptKey(cipher) {
-  try { return CryptoJS.AES.decrypt(cipher, SECRET).toString(CryptoJS.enc.Utf8) || null; }
-  catch { return null; }
-}
 

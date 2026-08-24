@@ -165,7 +165,7 @@ export default function AuthPanel({ currentUser, onUserUpdated }) {
               id="posting-key-input"
               type="password"
               className="form-input"
-              placeholder="5K... (Posting Key only)"
+              placeholder="5J... (Posting Key only)"
               value={postingKey}
               onChange={(e) => setPostingKey(e.target.value)}
               required={authType === 'key'}

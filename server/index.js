@@ -11,7 +11,7 @@ import {
   getUserTrails, addUserTrail, updateUserTrail, deleteUserTrail,
   updateUserStatus, deleteUser, getVoteLogs, getVoteStats
 } from './db.js';
-import { getAccount, calcVP, formatRep, encryptKey, hasBotAuthority, verifyPostingKey, grantAuthorityWithActiveKey, revokeAuthorityWithActiveKey, BOT_ACCOUNT } from './steemClient.js';
+import { getAccount, calcVP, formatRep, hasBotAuthority, BOT_ACCOUNT } from './steemClient.js';
 import { startStreamer, getSyncedBlock, getWatchedSet, refreshWatched, simulateVote } from './steemStreamer.js';
 import { initWs, broadcast, broadcastAll, getSubscribedUsers } from './wsHub.js';
 
@@ -144,7 +144,7 @@ app.get('/api/user/:username', async (req, res) => {
 // Universal Login / Join handler (handles both /api/login and /api/join)
 const handleAuthLogin = async (req, res) => {
   try {
-    const { username, authType = 'authority', postingKey } = req.body;
+    const { username } = req.body;
     if (!username?.trim()) return res.status(400).json({ success: false, error: 'Username required' });
 
     const clean = username.trim().toLowerCase();
@@ -153,29 +153,7 @@ const handleAuthLogin = async (req, res) => {
     const profile = await buildProfile(clean);
     if (!profile) return res.status(404).json({ success: false, error: `@${clean} not found on Steem blockchain` });
 
-    let encrypted = null;
-
-    if (authType === 'authority') {
-      // Identity verified via Keychain signature on client side.
-      // Posting authority to bot is managed from the dashboard, not a login prerequisite.
-    } else if (authType === 'key') {
-      if (!postingKey?.trim()) return res.status(400).json({ success: false, error: 'Private posting key required' });
-
-      // Cryptographically verify the key matches the account's on-chain posting public key
-      const keyValid = await verifyPostingKey(clean, postingKey.trim());
-      if (!keyValid) {
-        return res.status(403).json({
-          success: false,
-          error: 'Invalid posting key. The key you provided does not match the posting key for this account.'
-        });
-      }
-
-      encrypted = encryptKey(postingKey);
-    } else {
-      return res.status(400).json({ success: false, error: 'Invalid auth type' });
-    }
-
-    const user = upsertUserAccount({ username: clean, postingKeyEncrypted: encrypted, authType });
+    const user = upsertUserAccount({ username: clean });
     const trails = getUserTrails(clean);
 
     refreshWatched();
@@ -303,39 +281,7 @@ app.post('/api/simulate-vote', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// 8. Grant Authority with Active Key
-app.post('/api/grant-authority', async (req, res) => {
-  try {
-    const { username, activeKey } = req.body;
-    if (!username || !activeKey) return res.status(400).json({ success: false, error: 'Username and Active Key required' });
-    
-    const result = await grantAuthorityWithActiveKey({ username, activeKey });
-    if (result.success) {
-      res.json({ success: true, message: `Authority granted successfully.` });
-    } else {
-      res.status(500).json({ success: false, error: result.error });
-    }
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
 
-// 9. Revoke Authority with Active Key
-app.post('/api/revoke-authority', async (req, res) => {
-  try {
-    const { username, activeKey } = req.body;
-    if (!username || !activeKey) return res.status(400).json({ success: false, error: 'Username and Active Key required' });
-    
-    const result = await revokeAuthorityWithActiveKey({ username, activeKey });
-    if (result.success) {
-      res.json({ success: true, message: `Authority revoked successfully.` });
-    } else {
-      res.status(500).json({ success: false, error: result.error });
-    }
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
 
 // ── Serve Frontend in Production ──────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
