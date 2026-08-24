@@ -122,14 +122,19 @@ function VotingPowerMeter({ vp = 0 }) {
 function VoteStatusBadge({ status }) {
   switch (status) {
     case 'SUCCESS':
-      return <span className="badge badge-success">Voted</span>;
+      return <span className="badge badge-success">✅ Voted</span>;
     case 'SKIPPED_VP':
-      return <span className="badge badge-warning">Low VP</span>;
-    case 'SKIPPED_KEYCHAIN':
-      return <span className="badge badge-warning">No Auth</span>;
+      return <span className="badge badge-danger">❌ Low VP</span>;
     case 'FAILED':
-      return <span className="badge badge-danger">Failed</span>;
+      return <span className="badge badge-danger">❌ Failed</span>;
+    case 'SKIPPED_SELF_VOTE':
+    case 'SKIPPED_KEYCHAIN':
+    case 'SKIPPED':
+      return <span className="badge badge-neutral">Skipped</span>;
     default:
+      if (status && String(status).startsWith('SKIPPED')) {
+        return <span className="badge badge-neutral">Skipped</span>;
+      }
       return <span className="badge badge-neutral">{status}</span>;
   }
 }

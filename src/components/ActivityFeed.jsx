@@ -28,15 +28,20 @@ export default function ActivityFeed({ logs, onRefresh }) {
   const getStatusBadge = (status) => {
     switch (status) {
       case 'SUCCESS':
-        return <span className="badge badge-success" style={{ gap: '0.25rem' }}><CheckCircle size={12} /> SUCCESS</span>;
+        return <span className="badge badge-success">✅ Voted</span>;
       case 'SKIPPED_VP':
-        return <span className="badge badge-warning" style={{ gap: '0.25rem' }}><AlertTriangle size={12} /> SKIPPED (LOW VP)</span>;
-      case 'SKIPPED_SELF_VOTE':
-        return <span className="badge badge-warning" style={{ gap: '0.25rem' }}><AlertTriangle size={12} /> SKIPPED (SELF-VOTE)</span>;
+        return <span className="badge badge-danger">❌ Low VP</span>;
       case 'FAILED':
-        return <span className="badge" style={{ background: 'rgba(255,51,102,0.15)', color: 'var(--accent-rose)', border: '1px solid rgba(255,51,102,0.3)', gap: '0.25rem' }}><XCircle size={12} /> FAILED</span>;
+        return <span className="badge badge-danger">❌ Failed</span>;
+      case 'SKIPPED_SELF_VOTE':
+      case 'SKIPPED_KEYCHAIN':
+      case 'SKIPPED':
+        return <span className="badge badge-neutral">Skipped</span>;
       default:
-        return <span className="badge badge-info">{status}</span>;
+        if (status && String(status).startsWith('SKIPPED')) {
+          return <span className="badge badge-neutral">Skipped</span>;
+        }
+        return <span className="badge badge-neutral">{status}</span>;
     }
   };
 
