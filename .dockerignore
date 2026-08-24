@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.env
+npm-debug.log
+server/curation_trial.db
+server/curation_trial.db-wal
+server/curation_trial.db-shm
