@@ -2,6 +2,8 @@ import { getActiveFollowers, logVote }                              from './db.j
 import { getAccount, calcVP, hasBotAuthority,
          voteOnBehalf, BOT_ACCOUNT }       from './steemClient.js';
 
+const cleanName = (name) => (name || '').toString().replace(/^@/, '').trim().toLowerCase();
+
 /**
  * Fan out a detected leader vote to all active subscribers following that leader.
  */
@@ -9,10 +11,25 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
   const followers = getActiveFollowers(leader);
   if (!followers.length) return;
 
+  const targetAuthor = cleanName(author);
+  const targetLeader = cleanName(leader);
+
   console.log(`[VoteEngine] @${leader} → @${author}/${permlink} (${leaderWeight}%) — ${followers.length} follower(s)`);
 
   for (const user of followers) {
-    if (user.username === leader) continue; // skip self-loop
+    const voter = cleanName(user.username);
+
+    // Skip if voter is the leader
+    if (voter === targetLeader) continue;
+    
+    // Restrict self-voting: if post author is the follower account, skip vote
+    if (voter === targetAuthor) {
+      console.log(`[VoteEngine] @${user.username}: Skipped self-vote on own post @${author}/${permlink}`);
+      const effectiveWeight = Math.max(1, Math.round(((user.weight ?? 100) / 100) * leaderWeight));
+      log(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_SELF_VOTE', 'Self-voting restricted on own post');
+      continue;
+    }
+
     const delayMs = (user.delay ?? 0) * 60_000;
     setTimeout(() => executeVote({ user, leader, author, permlink, leaderWeight }), delayMs);
   }
@@ -20,8 +37,17 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
 
 async function executeVote({ user, leader, author, permlink, leaderWeight }) {
   const { username, weight: userWeight, min_vp } = user;
+  const voter = cleanName(username);
+  const targetAuthor = cleanName(author);
+
   // Scale user's weight % against leader's actual weight
   const effectiveWeight = Math.max(1, Math.round((userWeight / 100) * leaderWeight));
+
+  // Safeguard: restrict self-voting if author is the user
+  if (voter === targetAuthor) {
+    console.log(`[VoteEngine] @${username}: Skipped self-vote on own post @${author}/${permlink}`);
+    return log(leader, author, permlink, username, effectiveWeight, 'SKIPPED_SELF_VOTE', 'Self-voting restricted on own post');
+  }
 
   try {
     // 1. Check current Voting Power

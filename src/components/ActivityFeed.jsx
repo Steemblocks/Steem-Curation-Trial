@@ -31,6 +31,8 @@ export default function ActivityFeed({ logs, onRefresh }) {
         return <span className="badge badge-success" style={{ gap: '0.25rem' }}><CheckCircle size={12} /> SUCCESS</span>;
       case 'SKIPPED_VP':
         return <span className="badge badge-warning" style={{ gap: '0.25rem' }}><AlertTriangle size={12} /> SKIPPED (LOW VP)</span>;
+      case 'SKIPPED_SELF_VOTE':
+        return <span className="badge badge-warning" style={{ gap: '0.25rem' }}><AlertTriangle size={12} /> SKIPPED (SELF-VOTE)</span>;
       case 'FAILED':
         return <span className="badge" style={{ background: 'rgba(255,51,102,0.15)', color: 'var(--accent-rose)', border: '1px solid rgba(255,51,102,0.3)', gap: '0.25rem' }}><XCircle size={12} /> FAILED</span>;
       default:
