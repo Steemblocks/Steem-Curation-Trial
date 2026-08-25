@@ -513,7 +513,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
                 id="login-username-input"
                 type="text"
                 className="form-input"
-                placeholder="accountname"
+                placeholder="Steem Id"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoComplete="off"
