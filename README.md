@@ -1,5 +1,8 @@
 # Steem Curation Trial (Auto-Vote Tool)
 
+<img width="1345" height="597" alt="image" src="https://github.com/user-attachments/assets/ce0d6a60-cb58-4faa-a11e-620fa2964651" />
+
+
 A high-performance, real-time Steem curation trail dashboard. This tool allows users to seamlessly follow Steem curation trail leaders without having to securely surrender their active keys to a third-party service, or optionally by granting secure posting authority.
 
 ## Features
