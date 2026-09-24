@@ -1,7 +1,7 @@
 /**
  * wsHub.js
  * ────────
- * Lightweight WebSocket broadcast hub.
+ * Lightweight WebSocket broadcast hub with connection limits.
  * The server pushes events to all connected clients so the frontend
  * no longer needs to poll /api/status, /api/logs, and /api/user every 4 seconds.
  *
@@ -15,13 +15,43 @@ import { WebSocketServer } from 'ws';
 
 let wss = null;
 
+// ── Connection limits ─────────────────────────────────────────────────────────
+const MAX_CONNECTIONS = parseInt(process.env.WS_MAX_CONNECTIONS, 10) || 200;
+const MAX_PER_IP = parseInt(process.env.WS_MAX_PER_IP, 10) || 10;
+
+/** Track connections per IP */
+function getConnectionCountByIP(ip) {
+  if (!wss) return 0;
+  let count = 0;
+  wss.clients.forEach((ws) => {
+    if (ws._remoteAddress === ip) count++;
+  });
+  return count;
+}
+
 /**
  * Attach a WebSocket server to an existing HTTP server instance.
  */
 export function initWs(httpServer) {
   wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    // Track client IP for per-IP limiting
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+    ws._remoteAddress = ip;
+
+    // Enforce global connection limit
+    if (wss.clients.size > MAX_CONNECTIONS) {
+      ws.close(1013, 'Server at capacity');
+      return;
+    }
+
+    // Enforce per-IP connection limit
+    if (getConnectionCountByIP(ip) > MAX_PER_IP) {
+      ws.close(1013, 'Too many connections from this IP');
+      return;
+    }
+
     console.log('[WS] Client connected');
     ws.isAlive = true;
 
@@ -29,10 +59,15 @@ export function initWs(httpServer) {
 
     ws.on('message', (raw) => {
       try {
+        // Reject oversized messages (max 1KB)
+        if (raw.length > 1024) return;
+
         const msg = JSON.parse(raw);
         // Clients can subscribe to user-specific updates
         if (msg.type === 'subscribe' && msg.username) {
-          ws.subscribedUser = msg.username.toLowerCase();
+          // Sanitize username: only allow alphanumeric, dots, dashes (valid Steem username chars)
+          const clean = String(msg.username).toLowerCase().replace(/[^a-z0-9.\-]/g, '').slice(0, 32);
+          if (clean) ws.subscribedUser = clean;
         }
       } catch (e) { /* ignore malformed messages */ }
     });

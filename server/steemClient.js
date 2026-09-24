@@ -1,7 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const SECRET         = process.env.ENCRYPTION_KEY || 'dhaka_curation_trial_secret_2026';
 export const BOT_ACCOUNT    = (process.env.BOT_ACCOUNT    || '').toLowerCase();
 export const BOT_POSTING_KEY = (process.env.BOT_POSTING_KEY || '').trim();
 export const TRAIL_LEADER    = (process.env.TRAIL_LEADER   || 'dhaka.witness').toLowerCase().trim();

@@ -36,7 +36,7 @@ export default function Hero({ leaderStats, totalVotesProcessed }) {
 
           <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
-              <CheckCircle size={16} color="var(--accent-mint)" /> 100% Non-custodial / Key Encryption
+              <CheckCircle size={16} color="var(--accent-mint)" /> 100% Non-custodial / Zero-Knowledge Login
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
               <CheckCircle size={16} color="var(--accent-mint)" /> Steem Keychain 1-Click Support

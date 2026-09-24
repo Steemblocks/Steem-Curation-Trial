@@ -108,10 +108,4 @@ async function processBlock(blockNum) {
   }
 }
 
-/** Manually trigger a trail vote dispatch (for /api/simulate-vote). */
-export async function simulateVote(leader, author, permlink, weight = 100) {
-  console.log(`[Streamer] Simulating: @${leader} voted @${author}/${permlink} (${weight}%)`);
-  await dispatchTrailVotes({ leader, author, permlink, leaderWeight: weight });
-}
-
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

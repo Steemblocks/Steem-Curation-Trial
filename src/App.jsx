@@ -22,15 +22,24 @@ import {
   ChevronRight
 } from 'lucide-react';
 
+const SESSION_STORAGE_KEY = 'steem_curation_session';
+const JWT_STORAGE_KEY = 'steem_curation_jwt';
+
 // ── API Helpers ─────────────────────────────────────────────────────────────
-const api = (path) => fetch('/api' + path).then(r => r.json());
-const post = (path, body) => fetch('/api' + path, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body),
+const getAuthHeaders = () => {
+  const token = localStorage.getItem(JWT_STORAGE_KEY);
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
+
+const api = (path) => fetch('/api' + path, {
+  headers: { ...getAuthHeaders() }
 }).then(r => r.json());
 
-const SESSION_STORAGE_KEY = 'steem_curation_session';
+const post = (path, body) => fetch('/api' + path, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+  body: JSON.stringify(body),
+}).then(r => r.json());
 
 // ── Steem Keychain Helpers ──────────────────────────────────────────────────
 const hasKeychain = () => typeof window !== 'undefined' && !!window.steem_keychain;
@@ -388,7 +397,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
         const loginRes = await post('/login', { username: cleanUser });
 
         if (loginRes.success) {
-          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
+          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
         } else {
           setError(loginRes.error || 'Failed to authenticate.');
         }
@@ -420,7 +429,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
         const loginRes = await post('/login', { username: cleanUser });
 
         if (loginRes.success) {
-          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
+          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
         } else {
           setError(loginRes.error || 'Failed to authenticate session.');
         }
@@ -456,7 +465,7 @@ function LoginWall({ botAccount, onAuthenticated }) {
       const loginRes = await post('/login', { username: cleanUser });
 
       if (loginRes.success) {
-        onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails);
+        onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
       } else {
         setError(loginRes.error || 'Failed to finalize authentication.');
       }
@@ -1697,12 +1706,13 @@ export default function App() {
     };
   }, [loadDataOnce, connectWs]);
 
-  const handleAuthenticated = (user, profile, userTrails) => {
+  const handleAuthenticated = (user, profile, userTrails, token) => {
     loggedOutRef.current = false; // Clear the logout guard
     setCurrentUser(user);
     if (profile) setSteemProfile(profile);
     if (userTrails) setTrails(userTrails);
     localStorage.setItem(SESSION_STORAGE_KEY, user.username);
+    if (token) localStorage.setItem(JWT_STORAGE_KEY, token);
     setSessionRestored(true);
     // Subscribe WebSocket to this user's updates
     if (wsRef.current && wsRef.current.readyState === 1) {
@@ -1713,6 +1723,7 @@ export default function App() {
   const handleLogout = () => {
     loggedOutRef.current = true; // Set guard BEFORE clearing state
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(JWT_STORAGE_KEY);
     setCurrentUser(null);
     setSteemProfile(null);
     setTrails([]);

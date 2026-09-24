@@ -159,7 +159,7 @@ export default function AuthPanel({ currentUser, onUserUpdated }) {
           <div className="form-group">
             <label className="form-label" htmlFor="posting-key-input">
               <span>Private Posting Key</span>
-              <span style={{ color: 'var(--accent-amber)', fontSize: '0.75rem' }}>AES-256 Encrypted</span>
+              <span style={{ color: 'var(--accent-mint)', fontSize: '0.75rem' }}>Client-side only · Never sent to server</span>
             </label>
             <input
               id="posting-key-input"
