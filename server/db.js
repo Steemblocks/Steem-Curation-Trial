@@ -35,6 +35,11 @@ export function initDb() {
       weight        INTEGER NOT NULL DEFAULT 100,
       delay         INTEGER NOT NULL DEFAULT 0,
       min_vp        INTEGER NOT NULL DEFAULT 80,
+      allow_upvotes INTEGER NOT NULL DEFAULT 1,
+      allow_downvotes INTEGER NOT NULL DEFAULT 1,
+      max_daily_votes INTEGER NOT NULL DEFAULT 0,
+      whitelist     TEXT DEFAULT '',
+      blacklist     TEXT DEFAULT '',
       status        TEXT NOT NULL DEFAULT 'active',
       created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -42,6 +47,27 @@ export function initDb() {
       FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
     );
   `);
+
+  // Migration: add allow_upvotes/allow_downvotes if missing
+  try {
+    const trailColumns = db.prepare("PRAGMA table_info(user_trails)").all();
+    if (!trailColumns.some(c => c.name === 'allow_upvotes')) {
+      db.exec(`ALTER TABLE user_trails ADD COLUMN allow_upvotes INTEGER NOT NULL DEFAULT 1`);
+      db.exec(`ALTER TABLE user_trails ADD COLUMN allow_downvotes INTEGER NOT NULL DEFAULT 1`);
+      console.log('[DB] Added allow_upvotes/downvotes columns to user_trails');
+    }
+    if (!trailColumns.some(c => c.name === 'whitelist')) {
+      db.exec(`ALTER TABLE user_trails ADD COLUMN whitelist TEXT DEFAULT ''`);
+      db.exec(`ALTER TABLE user_trails ADD COLUMN blacklist TEXT DEFAULT ''`);
+      console.log('[DB] Added whitelist/blacklist columns to user_trails');
+    }
+    if (!trailColumns.some(c => c.name === 'max_daily_votes')) {
+      db.exec(`ALTER TABLE user_trails ADD COLUMN max_daily_votes INTEGER NOT NULL DEFAULT 0`);
+      console.log('[DB] Added max_daily_votes column to user_trails');
+    }
+  } catch (err) {
+    console.warn('[DB Migration] Note:', err.message);
+  }
 
   // Migration: if existing users have trail_account in older schema, migrate them
   try {
@@ -131,32 +157,37 @@ export function deleteUser(username) {
 
 export function getUserTrails(username) {
   return db.prepare(`
-    SELECT id, username, trail_account, weight, delay, min_vp, status, created_at, updated_at
+    SELECT id, username, trail_account, weight, delay, min_vp, allow_upvotes, allow_downvotes, max_daily_votes, whitelist, blacklist, status, created_at, updated_at
     FROM user_trails
     WHERE username = ?
     ORDER BY created_at ASC
   `).all(username.toLowerCase());
 }
 
-export function addUserTrail({ username, trailAccount, weight = 100, delay = 0, minVp = 80 }) {
+export function addUserTrail({ username, trailAccount, weight = 100, delay = 0, minVp = 80, allowUpvotes = 1, allowDownvotes = 1, maxDailyVotes = 0, whitelist = '', blacklist = '' }) {
   const u = username.trim().toLowerCase();
   const t = trailAccount.trim().toLowerCase();
   
   const stmt = db.prepare(`
-    INSERT INTO user_trails (username, trail_account, weight, delay, min_vp, status)
-    VALUES (?, ?, ?, ?, ?, 'active')
+    INSERT INTO user_trails (username, trail_account, weight, delay, min_vp, allow_upvotes, allow_downvotes, max_daily_votes, whitelist, blacklist, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     ON CONFLICT(username, trail_account) DO UPDATE SET
       weight     = excluded.weight,
       delay      = excluded.delay,
       min_vp     = excluded.min_vp,
+      allow_upvotes = excluded.allow_upvotes,
+      allow_downvotes = excluded.allow_downvotes,
+      max_daily_votes = excluded.max_daily_votes,
+      whitelist  = excluded.whitelist,
+      blacklist  = excluded.blacklist,
       status     = 'active',
       updated_at = CURRENT_TIMESTAMP
   `);
-  stmt.run(u, t, weight, delay, minVp);
+  stmt.run(u, t, weight, delay, minVp, allowUpvotes, allowDownvotes, maxDailyVotes, whitelist, blacklist);
   return getUserTrails(u);
 }
 
-export function updateUserTrail({ id, username, weight, delay, minVp, status }) {
+export function updateUserTrail({ id, username, weight, delay, minVp, allowUpvotes, allowDownvotes, maxDailyVotes, whitelist, blacklist, status }) {
   const u = username.trim().toLowerCase();
   const existing = db.prepare(`SELECT * FROM user_trails WHERE id = ? AND username = ?`).get(id, u);
   if (!existing) return null;
@@ -166,6 +197,11 @@ export function updateUserTrail({ id, username, weight, delay, minVp, status }) 
       weight     = COALESCE(?, weight),
       delay      = COALESCE(?, delay),
       min_vp     = COALESCE(?, min_vp),
+      allow_upvotes = COALESCE(?, allow_upvotes),
+      allow_downvotes = COALESCE(?, allow_downvotes),
+      max_daily_votes = COALESCE(?, max_daily_votes),
+      whitelist  = COALESCE(?, whitelist),
+      blacklist  = COALESCE(?, blacklist),
       status     = COALESCE(?, status),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND username = ?
@@ -173,6 +209,11 @@ export function updateUserTrail({ id, username, weight, delay, minVp, status }) 
     weight !== undefined ? weight : null,
     delay !== undefined ? delay : null,
     minVp !== undefined ? minVp : null,
+    allowUpvotes !== undefined ? allowUpvotes : null,
+    allowDownvotes !== undefined ? allowDownvotes : null,
+    maxDailyVotes !== undefined ? maxDailyVotes : null,
+    whitelist !== undefined ? whitelist : null,
+    blacklist !== undefined ? blacklist : null,
     status !== undefined ? status : null,
     id,
     u
@@ -199,7 +240,12 @@ export function getActiveFollowers(trailAccount) {
       t.trail_account,
       t.weight,
       t.delay,
-      t.min_vp
+      t.min_vp,
+      t.allow_upvotes,
+      t.allow_downvotes,
+      t.max_daily_votes,
+      t.whitelist,
+      t.blacklist
     FROM user_trails t
     JOIN users u ON u.username = t.username
     WHERE t.status = 'active' 
@@ -228,6 +274,15 @@ export function logVote({ leader, author, permlink, voter, weight, status, txId 
     INSERT INTO vote_logs (leader, author, permlink, voter, weight, status, tx_id, error)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(leader, author, permlink, voter, weight, status, txId, error);
+}
+
+export function getDailyVoteCount(voter, leader) {
+  const result = db.prepare(`
+    SELECT COUNT(*) as c FROM vote_logs 
+    WHERE voter = ? AND leader = ? AND status = 'SUCCESS' 
+      AND timestamp >= datetime('now', '-1 day')
+  `).get(voter.toLowerCase(), leader.toLowerCase());
+  return result?.c ?? 0;
 }
 
 export function getVoteLogs({ limit = 50, offset = 0 } = {}) {

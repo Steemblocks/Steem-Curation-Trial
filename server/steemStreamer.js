@@ -95,7 +95,7 @@ async function processBlock(blockNum) {
       const voter = (data.voter ?? '').toLowerCase();
       if (!watchedSet.has(voter)) continue;
 
-      const leaderWeightPct = Math.abs(data.weight) / 100;
+      const leaderWeightPct = data.weight / 100; // preserve sign: positive = upvote, negative = downvote
       console.log(`[Streamer] 🔔 Block #${blockNum}: @${voter} voted on @${data.author}/${data.permlink} (${leaderWeightPct}%)`);
 
       dispatchTrailVotes({

@@ -1,8 +1,16 @@
-import { getActiveFollowers, logVote, getVoteLogs } from './db.js';
+import { getActiveFollowers, logVote, getVoteLogs, getDailyVoteCount } from './db.js';
 import { getAccount, calcVP, hasBotAuthority, voteOnBehalf, BOT_ACCOUNT } from './steemClient.js';
 import { broadcastAll } from './wsHub.js';
 
 const cleanName = (name) => (name || '').toString().replace(/^@/, '').trim().toLowerCase();
+
+/** Scale follower weight against leader weight, preserving vote direction (upvote/downvote sign) */
+function calcEffectiveWeight(userWeight, leaderWeight) {
+  const raw = ((userWeight ?? 100) / 100) * leaderWeight;
+  if (Math.abs(raw) < 0.01) return 0;
+  // Ensure we don't accidentally exceed max bounds, though steemClient handles this
+  return raw;
+}
 
 // Safe rate-limiting interval for Steem blockchain (Steem consensus requires >= 3.0s between votes)
 const MIN_VOTE_INTERVAL_MS = 3500;
@@ -34,9 +42,56 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
     // Restrict self-voting: if post author is the follower account, skip vote
     if (voter === targetAuthor) {
       console.log(`[VoteEngine] @${user.username}: Skipped self-vote on own post @${author}/${permlink}`);
-      const effectiveWeight = Math.max(1, Math.round(((user.weight ?? 100) / 100) * leaderWeight));
+      const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
       logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_SELF_VOTE', 'Self-voting restricted on own post');
       continue;
+    }
+
+    // Enforce upvote/downvote preferences
+    if (leaderWeight > 0 && user.allow_upvotes === 0) {
+      console.log(`[VoteEngine] @${user.username}: Skipped upvote (disabled by user)`);
+      const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+      logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_PREFERENCE', 'Upvotes are disabled in trail settings');
+      continue;
+    }
+    if (leaderWeight < 0 && user.allow_downvotes === 0) {
+      console.log(`[VoteEngine] @${user.username}: Skipped downvote (disabled by user)`);
+      const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+      logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_PREFERENCE', 'Downvotes are disabled in trail settings');
+      continue;
+    }
+
+    // Enforce max daily votes
+    if (user.max_daily_votes > 0) {
+      const dailyVotesCast = getDailyVoteCount(user.username, leader);
+      if (dailyVotesCast >= user.max_daily_votes) {
+        console.log(`[VoteEngine] @${user.username}: Skipped vote on @${author} (reached daily limit of ${user.max_daily_votes})`);
+        const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+        logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_LIMIT', `Daily limit of ${user.max_daily_votes} votes reached`);
+        continue;
+      }
+    }
+
+    // Enforce whitelist
+    if (user.whitelist && user.whitelist.trim().length > 0) {
+      const whitelistArray = user.whitelist.split(',');
+      if (!whitelistArray.includes(targetAuthor)) {
+        console.log(`[VoteEngine] @${user.username}: Skipped vote on @${author} (not in whitelist)`);
+        const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+        logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_WHITELIST', `Author @${author} is not on your whitelist`);
+        continue;
+      }
+    }
+
+    // Enforce blacklist
+    if (user.blacklist && user.blacklist.trim().length > 0) {
+      const blacklistArray = user.blacklist.split(',');
+      if (blacklistArray.includes(targetAuthor)) {
+        console.log(`[VoteEngine] @${user.username}: Skipped vote on @${author} (in blacklist)`);
+        const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+        logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_BLACKLIST', `Author @${author} is on your blacklist`);
+        continue;
+      }
     }
 
     const delayMs = (user.delay ?? 0) * 60_000;
@@ -125,7 +180,13 @@ async function executeVote({ user, leader, author, permlink, leaderWeight }) {
   const targetAuthor = cleanName(author);
 
   // Scale user's weight % against leader's actual weight
-  const effectiveWeight = Math.max(1, Math.round(((userWeight ?? 100) / 100) * leaderWeight));
+  const effectiveWeight = calcEffectiveWeight(userWeight, leaderWeight);
+
+  // If the scaled weight rounds to zero (e.g. 1% of a tiny leader vote), skip
+  if (effectiveWeight === 0) {
+    console.log(`[VoteEngine] @${username}: Effective weight rounds to 0 — skipped`);
+    return logAndBroadcast(leader, author, permlink, username, 0, 'SKIPPED', 'Effective weight too small after scaling');
+  }
 
   // Safeguard: restrict self-voting if author is the user
   if (voter === targetAuthor) {

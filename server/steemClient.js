@@ -11,7 +11,6 @@ const NODES = [
   'https://api.justyy.com',
   'https://api.steem.fans',
   'https://steem.justyy.com',
-  'https://steem.bts.tw',
 ];
 let ni = 0;
 export const node = () => NODES[ni];
@@ -131,13 +130,16 @@ export async function hasBotAuthority(username) {
  * @param {string} voter    - The enrolled user account casting the vote
  * @param {string} author   - Post author
  * @param {string} permlink - Post permlink
- * @param {number} weight   - Vote weight 1-100 (%)
+ * @param {number} weight   - Vote weight: 1 to 100 (upvote) or -1 to -100 (downvote)
  */
 export async function voteOnBehalf({ voter, author, permlink, weight }) {
   const key = (BOT_POSTING_KEY || '').trim();
   if (!key) throw new Error('BOT_POSTING_KEY not configured in .env');
 
-  const steemWeight = Math.round(Math.min(100, Math.max(1, weight)) * 100);
+  // Preserve vote direction: positive = upvote, negative = downvote
+  const sign = weight < 0 ? -1 : 1;
+  const absWeight = Math.min(100, Math.max(0.01, Math.abs(weight)));
+  const steemWeight = Math.round(sign * absWeight * 100); // -10000 to -100 or 100 to 10000
   const s = await steemJs();
 
   // Attempt broadcast with automated node failover

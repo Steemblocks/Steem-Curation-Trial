@@ -605,6 +605,11 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
   const [weight, setWeight] = useState(100);
   const [delay, setDelay] = useState(0);
   const [minVp, setMinVp] = useState(80);
+  const [allowUpvotes, setAllowUpvotes] = useState(true);
+  const [allowDownvotes, setAllowDownvotes] = useState(true);
+  const [whitelist, setWhitelist] = useState('');
+  const [blacklist, setBlacklist] = useState('');
+  const [maxDailyVotes, setMaxDailyVotes] = useState(0);
   
   // Real-time verification state
   const [checking, setChecking] = useState(false);
@@ -659,7 +664,12 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
         trailAccount: verifiedAccount.name,
         weight: parseInt(weight, 10),
         delay: parseInt(delay, 10),
-        minVp: parseInt(minVp, 10)
+        minVp: parseInt(minVp, 10),
+        allowUpvotes,
+        allowDownvotes,
+        maxDailyVotes: parseInt(maxDailyVotes, 10) || 0,
+        whitelist,
+        blacklist
       });
       // Reset form
       setTargetAccount('');
@@ -802,6 +812,68 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
             />
           </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.5rem', cursor: 'pointer', margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+              <input
+                type="checkbox"
+                checked={allowUpvotes}
+                onChange={(e) => setAllowUpvotes(e.target.checked)}
+                style={{ width: '16px', height: '16px', accentColor: 'var(--primary-cyan)' }}
+              />
+              <span>Allow Upvotes</span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.5rem', cursor: 'pointer', margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+              <input
+                type="checkbox"
+                checked={allowDownvotes}
+                onChange={(e) => setAllowDownvotes(e.target.checked)}
+                style={{ width: '16px', height: '16px', accentColor: 'var(--accent-rose)' }}
+              />
+              <span>Allow Downvotes</span>
+            </label>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '1rem' }}>
+            <label className="form-label" htmlFor="maxDailyVotes">Max Daily Votes (0 for unlimited)</label>
+            <input
+              id="maxDailyVotes"
+              type="number"
+              min="0"
+              step="1"
+              className="form-input"
+              value={maxDailyVotes}
+              onChange={(e) => setMaxDailyVotes(e.target.value)}
+            />
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '1rem' }}>
+            <label className="form-label" htmlFor="whitelist">Author Whitelist (optional, comma-separated)</label>
+            <input
+              id="whitelist"
+              type="text"
+              className="form-input"
+              placeholder="e.g. steemcurator01, blocktrades"
+              value={whitelist}
+              onChange={(e) => setWhitelist(e.target.value)}
+              autoComplete="off"
+              spellCheck="false"
+            />
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+            <label className="form-label" htmlFor="blacklist">Author Blacklist (optional, comma-separated)</label>
+            <input
+              id="blacklist"
+              type="text"
+              className="form-input"
+              placeholder="e.g. spammer, badactor"
+              value={blacklist}
+              onChange={(e) => setBlacklist(e.target.value)}
+              autoComplete="off"
+              spellCheck="false"
+            />
+          </div>
+
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem' }}>
             <button
               type="button"
@@ -841,6 +913,11 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const [editWeight, setEditWeight] = useState(100);
   const [editDelay, setEditDelay] = useState(0);
   const [editMinVp, setEditMinVp] = useState(80);
+  const [editAllowUpvotes, setEditAllowUpvotes] = useState(true);
+  const [editAllowDownvotes, setEditAllowDownvotes] = useState(true);
+  const [editWhitelist, setEditWhitelist] = useState('');
+  const [editBlacklist, setEditBlacklist] = useState('');
+  const [editMaxDailyVotes, setEditMaxDailyVotes] = useState(0);
 
   // Pagination & Refresh state for Recent Vote Activity
   const [currentPage, setCurrentPage] = useState(1);
@@ -962,13 +1039,18 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
     }
   };
 
-  const handleAddTrail = async ({ trailAccount, weight, delay, minVp }) => {
+const handleAddTrail = async ({ trailAccount, weight, delay, minVp, allowUpvotes, allowDownvotes }) => {
     const res = await post('/trails/add', {
       username: user.username,
       trailAccount,
       weight,
       delay,
-      minVp
+      minVp,
+      allowUpvotes,
+      allowDownvotes,
+      maxDailyVotes,
+      whitelist,
+      blacklist
     });
 
     if (res.success) {
@@ -998,6 +1080,11 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
     setEditWeight(trail.weight);
     setEditDelay(trail.delay);
     setEditMinVp(trail.min_vp);
+    setEditAllowUpvotes(trail.allow_upvotes === 1);
+    setEditAllowDownvotes(trail.allow_downvotes === 1);
+    setEditWhitelist(trail.whitelist || '');
+    setEditBlacklist(trail.blacklist || '');
+    setEditMaxDailyVotes(trail.max_daily_votes || 0);
   };
 
   const handleSaveEditTrail = async (trailId) => {
@@ -1007,7 +1094,12 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
         username: user.username,
         weight: parseInt(editWeight, 10),
         delay: parseInt(editDelay, 10),
-        minVp: parseInt(editMinVp, 10)
+        minVp: parseInt(editMinVp, 10),
+        allowUpvotes: editAllowUpvotes,
+        allowDownvotes: editAllowDownvotes,
+        maxDailyVotes: parseInt(editMaxDailyVotes, 10) || 0,
+        whitelist: editWhitelist,
+        blacklist: editBlacklist
       });
       if (res.success) {
         setEditingTrailId(null);
@@ -1313,7 +1405,10 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                         </div>
                         {!isEditing && (
                           <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
-                            Weight: <strong style={{ color: 'var(--text-primary)' }}>{trail.weight}%</strong> · Delay: <strong style={{ color: 'var(--text-primary)' }}>{trail.delay}m</strong> · Min VP: <strong style={{ color: 'var(--text-primary)' }}>{trail.min_vp}%</strong>
+                            Weight: <strong style={{ color: 'var(--text-primary)' }}>{trail.weight}%</strong> · Delay: <strong style={{ color: 'var(--text-primary)' }}>{trail.delay}m</strong> · Min VP: <strong style={{ color: 'var(--text-primary)' }}>{trail.min_vp}%</strong> · Upvotes: <strong style={{ color: trail.allow_upvotes ? 'var(--primary-cyan)' : 'var(--text-secondary)' }}>{trail.allow_upvotes ? 'On' : 'Off'}</strong> · Downvotes: <strong style={{ color: trail.allow_downvotes ? 'var(--accent-rose)' : 'var(--text-secondary)' }}>{trail.allow_downvotes ? 'On' : 'Off'}</strong>
+                            {trail.max_daily_votes > 0 ? <> · Max Votes/Day: <strong style={{ color: 'var(--text-primary)' }}>{trail.max_daily_votes}</strong></> : null}
+                            {trail.whitelist ? <> · Whitelist: <strong style={{ color: 'var(--primary-cyan)' }}>{trail.whitelist.split(',').length} author(s)</strong></> : null}
+                            {trail.blacklist ? <> · Blacklist: <strong style={{ color: 'var(--accent-rose)' }}>{trail.blacklist.split(',').length} author(s)</strong></> : null}
                           </div>
                         )}
                       </div>
@@ -1399,6 +1494,27 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                             onChange={(e) => setEditMinVp(e.target.value)}
                           />
                         </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem', cursor: 'pointer', fontSize: '0.8rem', margin: 0, color: 'var(--text-secondary)' }}>
+                            <input
+                              type="checkbox"
+                              checked={editAllowUpvotes}
+                              onChange={(e) => setEditAllowUpvotes(e.target.checked)}
+                              style={{ width: '14px', height: '14px', accentColor: 'var(--primary-cyan)' }}
+                            />
+                            <span>Upvotes</span>
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem', cursor: 'pointer', fontSize: '0.8rem', margin: 0, color: 'var(--text-secondary)' }}>
+                            <input
+                              type="checkbox"
+                              checked={editAllowDownvotes}
+                              onChange={(e) => setEditAllowDownvotes(e.target.checked)}
+                              style={{ width: '14px', height: '14px', accentColor: 'var(--accent-rose)' }}
+                            />
+                            <span>Downvotes</span>
+                          </label>
+                        </div>
                       </div>
 
                       <div className="form-group" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
@@ -1416,6 +1532,42 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                           <option value={10}>10 minutes</option>
                           <option value={15}>15 minutes</option>
                         </select>
+                      </div>
+
+                      <div className="grid-2col" style={{ gap: '0.75rem', marginTop: '0.75rem', marginBottom: '0.5rem' }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label" style={{ fontSize: '0.75rem' }}>Max Daily Votes (0 = ∞)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            className="form-input"
+                            style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}
+                            value={editMaxDailyVotes}
+                            onChange={(e) => setEditMaxDailyVotes(e.target.value)}
+                          />
+                        </div>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label className="form-label" style={{ fontSize: '0.75rem' }}>Whitelist (csv)</label>
+                          <input
+                            type="text"
+                            className="form-input"
+                            style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}
+                            value={editWhitelist}
+                            onChange={(e) => setEditWhitelist(e.target.value)}
+                            placeholder="e.g. bob"
+                          />
+                        </div>
+                      </div>
+                      <div className="form-group" style={{ margin: 0, marginTop: '0.5rem' }}>
+                          <label className="form-label" style={{ fontSize: '0.75rem' }}>Blacklist (comma-separated)</label>
+                          <input
+                            type="text"
+                            className="form-input"
+                            style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}
+                            value={editBlacklist}
+                            onChange={(e) => setEditBlacklist(e.target.value)}
+                            placeholder="e.g. spammer"
+                          />
                       </div>
                     </div>
                   )}

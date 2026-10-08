@@ -236,10 +236,15 @@ app.post('/api/join', authLimiter, handleAuthLogin);
 
 // ── Protected Routes (JWT auth + self-verification required) ──────────────────
 
+const cleanList = (str) => {
+  if (typeof str !== 'string') return '';
+  return str.split(',').map(s => s.replace(/^@/, '').trim().toLowerCase()).filter(Boolean).join(',');
+};
+
 // 1. Add followed trail
 app.post('/api/trails/add', requireAuth, requireSelf, async (req, res) => {
   try {
-    const { username, trailAccount, weight = 100, delay = 0, minVp = 80 } = req.body;
+    const { username, trailAccount, weight = 100, delay = 0, minVp = 80, allowUpvotes = true, allowDownvotes = true, maxDailyVotes = 0, whitelist = '', blacklist = '' } = req.body;
     if (!trailAccount) return res.status(400).json({ success: false, error: 'Trail account required' });
 
     const cleanUser  = username.trim().toLowerCase();
@@ -256,7 +261,12 @@ app.post('/api/trails/add', requireAuth, requireSelf, async (req, res) => {
       trailAccount: cleanTrail,
       weight: Math.min(100, Math.max(1, parseInt(weight, 10) || 100)),
       delay: Math.min(60, Math.max(0, parseInt(delay, 10) || 0)),
-      minVp: Math.min(99, Math.max(10, parseInt(minVp, 10) || 80))
+      minVp: Math.min(99, Math.max(10, parseInt(minVp, 10) || 80)),
+      allowUpvotes: allowUpvotes ? 1 : 0,
+      allowDownvotes: allowDownvotes ? 1 : 0,
+      maxDailyVotes: Math.max(0, parseInt(maxDailyVotes, 10) || 0),
+      whitelist: cleanList(whitelist),
+      blacklist: cleanList(blacklist)
     });
 
     refreshWatched();
@@ -268,7 +278,7 @@ app.post('/api/trails/add', requireAuth, requireSelf, async (req, res) => {
 // 2. Update specific followed trail
 app.post('/api/trails/update', requireAuth, requireSelf, (req, res) => {
   try {
-    const { id, username, weight, delay, minVp, status } = req.body;
+    const { id, username, weight, delay, minVp, allowUpvotes, allowDownvotes, maxDailyVotes, whitelist, blacklist, status } = req.body;
     if (!id) return res.status(400).json({ success: false, error: 'Trail ID required' });
 
     // Validate status if provided
@@ -282,6 +292,11 @@ app.post('/api/trails/update', requireAuth, requireSelf, (req, res) => {
       weight: weight !== undefined ? Math.min(100, Math.max(1, parseInt(weight, 10))) : undefined,
       delay: delay !== undefined ? Math.min(60, Math.max(0, parseInt(delay, 10))) : undefined,
       minVp: minVp !== undefined ? Math.min(99, Math.max(10, parseInt(minVp, 10))) : undefined,
+      allowUpvotes: allowUpvotes !== undefined ? (allowUpvotes ? 1 : 0) : undefined,
+      allowDownvotes: allowDownvotes !== undefined ? (allowDownvotes ? 1 : 0) : undefined,
+      maxDailyVotes: maxDailyVotes !== undefined ? Math.max(0, parseInt(maxDailyVotes, 10)) : undefined,
+      whitelist: whitelist !== undefined ? cleanList(whitelist) : undefined,
+      blacklist: blacklist !== undefined ? cleanList(blacklist) : undefined,
       status: status || undefined
     });
 
