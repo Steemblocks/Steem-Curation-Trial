@@ -285,14 +285,17 @@ export function getDailyVoteCount(voter, leader) {
   return result?.c ?? 0;
 }
 
-export function getVoteLogs({ limit = 50, offset = 0 } = {}) {
-  // Support either getVoteLogs(50) or getVoteLogs({ limit: 50, offset: 0 })
-  if (typeof limit === 'number' && typeof offset === 'number') {
-    return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`).all(limit, offset);
+export function getVoteLogs(opts = 50, maybeOffset = 0) {
+  let limit = 50;
+  let offset = 0;
+  if (typeof opts === 'number') {
+    limit = opts;
+    offset = typeof maybeOffset === 'number' ? maybeOffset : 0;
+  } else if (opts && typeof opts === 'object') {
+    limit = typeof opts.limit === 'number' ? opts.limit : 50;
+    offset = typeof opts.offset === 'number' ? opts.offset : 0;
   }
-  const lim = typeof limit === 'object' ? (limit.limit || 50) : 50;
-  const off = typeof limit === 'object' ? (limit.offset || 0) : 0;
-  return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`).all(lim, off);
+  return db.prepare(`SELECT * FROM vote_logs ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?`).all(limit, offset);
 }
 
 export function getTotalVoteLogsCount() {

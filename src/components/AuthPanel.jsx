@@ -27,13 +27,20 @@ export default function AuthPanel({ currentUser, onUserUpdated }) {
 
     try {
       // Handle Steem Keychain authorization if available in window
-      if (authType === 'keychain' && window.steem_keychain) {
-        console.log('[Keychain] Requesting posting authority or sign for:', username);
+      let signature = null;
+      if (authType === 'key') {
+        const privWif = postingKey.trim();
+        setPostingKey(''); // Instantly wipe key from memory
+        if (window.steem?.auth?.signature?.signBuffer) {
+          const sigObj = window.steem.auth.signature.signBuffer('login_challenge', privWif);
+          signature = sigObj.toHex();
+        }
       }
 
+      // Zero-Knowledge: Only send username and signature, NEVER private keys
       const res = await joinTrial({
         username: username.trim().toLowerCase(),
-        postingKey,
+        signature,
         authType,
         weight,
         delay,

@@ -13,10 +13,11 @@ import {
   getUserTrails, addUserTrail, updateUserTrail, deleteUserTrail,
   updateUserStatus, deleteUser, getVoteLogs, getTotalVoteLogsCount, getVoteStats
 } from './db.js';
-import { getAccount, calcVP, formatRep, hasBotAuthority, BOT_ACCOUNT } from './steemClient.js';
+import { getAccount, calcVP, formatRep, hasBotAuthority, verifySignature, BOT_ACCOUNT } from './steemClient.js';
 import { startStreamer, getSyncedBlock, getWatchedSet, refreshWatched } from './steemStreamer.js';
 import { initWs, broadcast, broadcastAll, getSubscribedUsers } from './wsHub.js';
 import { generateToken, requireAuth, requireSelf } from './auth.js';
+import { createChallenge, consumeChallenge } from './challenge.js';
 
 const app  = express();
 const server = createServer(app);
@@ -25,11 +26,36 @@ const PORT = process.env.PORT || 5000;
 // ── Valid status values (whitelist) ───────────────────────────────────────────
 const VALID_STATUSES = ['active', 'paused'];
 
+// ── Steem username format validation ───────────────────────────────────────────
+const STEEM_NAME_REGEX = /^[a-z][a-z0-9\-.]{2,15}$/;
+export function isValidSteemUsername(name) {
+  return typeof name === 'string' && STEEM_NAME_REGEX.test(name.trim().toLowerCase());
+}
+
 // ── Security Middleware ───────────────────────────────────────────────────────
 
-// Security headers (CSP, X-Frame-Options, etc.)
+// Security headers with strict Content Security Policy (CSP)
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP to avoid breaking frontend CDN scripts (steem.js)
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-eval'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      connectSrc: [
+        "'self'",
+        "ws:",
+        "wss:",
+        "https://api.steemit.com",
+        "https://api.justyy.com",
+        "https://api.steem.fans",
+        "https://steem.justyy.com",
+      ],
+      imgSrc: ["'self'", "data:", "https://steemitimages.com"],
+      objectSrc: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
 }));
 
 // CORS — restrict to allowed origins
@@ -120,7 +146,7 @@ function broadcastStatusAndLogs() {
       activeMembers: stats.activeMembers,
       totalVotes: stats.totalVotes,
     });
-    broadcastAll('logs', getVoteLogs(30));
+    broadcastAll('logs', getVoteLogs(50));
 
     // Push live user profile updates (for Voting Power) to currently subscribed clients
     const activeUsers = getSubscribedUsers();
@@ -155,7 +181,9 @@ app.get('/api/logs', (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 100), 200);
-    const offset = req.query.offset !== undefined ? parseInt(req.query.offset, 10) : (page - 1) * limit;
+    const offset = req.query.offset !== undefined 
+      ? Math.max(0, parseInt(req.query.offset, 10) || 0) 
+      : (page - 1) * limit;
 
     const total = getTotalVoteLogsCount();
     const logs = getVoteLogs({ limit, offset });
@@ -175,7 +203,10 @@ app.get('/api/logs', (req, res) => {
 // Verify a Steem account exists on blockchain
 app.get('/api/verify/:username', async (req, res) => {
   try {
-    const username = req.params.username.trim().toLowerCase();
+    const username = (req.params.username || '').trim().toLowerCase();
+    if (!isValidSteemUsername(username)) {
+      return res.status(400).json({ success: false, error: 'Invalid Steem account name format' });
+    }
     const profile = await buildProfile(username);
     if (!profile) return res.status(404).json({ success: false, error: `@${username} not found on Steem blockchain` });
     res.json({ success: true, profile });
@@ -185,7 +216,10 @@ app.get('/api/verify/:username', async (req, res) => {
 // Single user info + live Steem profile + followed trails
 app.get('/api/user/:username', async (req, res) => {
   try {
-    const username   = req.params.username.toLowerCase();
+    const username = (req.params.username || '').trim().toLowerCase();
+    if (!isValidSteemUsername(username)) {
+      return res.status(400).json({ success: false, error: 'Invalid Steem account name format' });
+    }
     const trialUser  = getUser(username);
     const profile    = await buildProfile(username).catch(() => null);
     const hasAuth    = profile
@@ -206,18 +240,52 @@ app.get('/api/user/:username', async (req, res) => {
 
 // ── Authentication Routes ─────────────────────────────────────────────────────
 
+// Request a cryptographic challenge for sign-in
+app.post('/api/auth/challenge', authLimiter, (req, res) => {
+  try {
+    const { username } = req.body;
+    if (!isValidSteemUsername(username)) {
+      return res.status(400).json({ success: false, error: 'Valid Steem username required (3-16 chars, lowercase alphanumeric, dots, hyphens)' });
+    }
+    const clean = username.trim().toLowerCase();
+    const challenge = createChallenge(clean);
+    if (!challenge) {
+      return res.status(429).json({ success: false, error: 'Please wait a moment before requesting a new challenge.' });
+    }
+    res.json({ success: true, challenge });
+  } catch (e) { safeError(res, e, 'AuthChallenge'); }
+});
+
 // Universal Login / Join handler (handles both /api/login and /api/join)
 const handleAuthLogin = async (req, res) => {
   try {
-    const { username } = req.body;
-    if (!username?.trim()) return res.status(400).json({ success: false, error: 'Username required' });
+    const { username, signature } = req.body;
+    if (!isValidSteemUsername(username)) {
+      return res.status(400).json({ success: false, error: 'Valid Steem username required.' });
+    }
+    if (typeof signature !== 'string' || !signature.trim()) {
+      return res.status(400).json({ success: false, error: 'Cryptographic signature required to verify account ownership.' });
+    }
 
     const clean = username.trim().toLowerCase();
 
-    // Verify account exists on Steem
-    const profile = await buildProfile(clean);
-    if (!profile) return res.status(404).json({ success: false, error: `@${clean} not found on Steem blockchain` });
+    // 1. Consume the active challenge for this user
+    const challenge = consumeChallenge(clean);
+    if (!challenge) {
+      return res.status(401).json({ success: false, error: 'Challenge expired or invalid. Please try signing in again.' });
+    }
 
+    // 2. Verify account exists on Steem
+    const account = await getAccount(clean);
+    if (!account) return res.status(404).json({ success: false, error: `@${clean} not found on Steem blockchain` });
+
+    // 3. Cryptographically verify signature against on-chain public keys
+    const isValid = verifySignature(challenge, signature.trim(), account);
+    if (!isValid) {
+      return res.status(401).json({ success: false, error: 'Signature verification failed. The provided key or signature does not match @' + clean });
+    }
+
+    const profile = await buildProfile(clean);
     const user = upsertUserAccount({ username: clean });
     const trails = getUserTrails(clean);
 
@@ -238,17 +306,24 @@ app.post('/api/join', authLimiter, handleAuthLogin);
 
 const cleanList = (str) => {
   if (typeof str !== 'string') return '';
-  return str.split(',').map(s => s.replace(/^@/, '').trim().toLowerCase()).filter(Boolean).join(',');
+  return str.slice(0, 2000).split(',').map(s => s.replace(/^@/, '').trim().toLowerCase()).filter(isValidSteemUsername).slice(0, 100).join(',');
 };
 
 // 1. Add followed trail
 app.post('/api/trails/add', requireAuth, requireSelf, async (req, res) => {
   try {
     const { username, trailAccount, weight = 100, delay = 0, minVp = 80, allowUpvotes = true, allowDownvotes = true, maxDailyVotes = 0, whitelist = '', blacklist = '' } = req.body;
-    if (!trailAccount) return res.status(400).json({ success: false, error: 'Trail account required' });
+    if (typeof trailAccount !== 'string' || !isValidSteemUsername(trailAccount)) {
+      return res.status(400).json({ success: false, error: 'Valid trail account name required.' });
+    }
 
     const cleanUser  = username.trim().toLowerCase();
     const cleanTrail = trailAccount.trim().toLowerCase();
+
+    // Prevent self-following (cannot trail yourself)
+    if (cleanUser === cleanTrail) {
+      return res.status(400).json({ success: false, error: 'You cannot follow your own account as a curation trail.' });
+    }
 
     // Verify trail target exists on Steem
     const trailProfile = await buildProfile(cleanTrail);

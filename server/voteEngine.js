@@ -97,6 +97,12 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
     const delayMs = (user.delay ?? 0) * 60_000;
     const executeAfter = Date.now() + delayMs;
 
+    // Guard against memory exhaustion by capping in-memory queue size
+    if (voteQueue.length >= 2000) {
+      console.warn('[VoteEngine] Queue capacity reached (2000 jobs) — dropping oldest job');
+      voteQueue.shift();
+    }
+
     voteQueue.push({
       user,
       leader,

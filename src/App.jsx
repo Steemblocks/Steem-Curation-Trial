@@ -31,25 +31,43 @@ const getAuthHeaders = () => {
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 };
 
+const handleAuthError = () => {
+  if (typeof window !== 'undefined' && window.dispatchEvent) {
+    window.dispatchEvent(new CustomEvent('steem_auth_expired'));
+  }
+};
+
 const api = (path) => fetch('/api' + path, {
   headers: { ...getAuthHeaders() }
-}).then(r => r.json());
+}).then(async r => {
+  if (r.status === 401 && !path.startsWith('/auth') && path !== '/status') {
+    handleAuthError();
+  }
+  return r.json();
+});
 
 const post = (path, body) => fetch('/api' + path, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
   body: JSON.stringify(body),
-}).then(r => r.json());
+}).then(async r => {
+  if (r.status === 401 && path !== '/login' && path !== '/join' && !path.startsWith('/auth')) {
+    handleAuthError();
+  }
+  return r.json();
+});
 
 // ── Steem Keychain Helpers ──────────────────────────────────────────────────
 const hasKeychain = () => typeof window !== 'undefined' && !!window.steem_keychain;
 
-function keychainSignLogin(username) {
+function keychainSignMessage(username, message) {
   return new Promise((resolve) => {
-    const message = `Curation Trial Login: ${username} @ ${Date.now()}`;
     window.steem_keychain.requestSignBuffer(username, message, 'Posting', (res) => {
-      if (res.success) resolve({ ok: true });
-      else resolve({ ok: false, error: res.message || 'Keychain signature was cancelled or rejected.' });
+      if (res.success && res.result) {
+        resolve({ ok: true, signature: res.result });
+      } else {
+        resolve({ ok: false, error: res.message || 'Keychain signature was cancelled or rejected.' });
+      }
     });
   });
 }
@@ -84,7 +102,9 @@ function keychainRevokeAuthority({ username, botAccount, currentPosting, memoKey
   return new Promise((resolve) => {
     const newPosting = {
       weight_threshold: currentPosting?.weight_threshold || 1,
-      account_auths: (currentPosting?.account_auths ?? []).filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase()),
+      account_auths: (currentPosting?.account_auths ?? [])
+        .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase())
+        .sort((a, b) => a[0].localeCompare(b[0])),
       key_auths: currentPosting?.key_auths || [],
     };
 
@@ -103,6 +123,40 @@ function keychainRevokeAuthority({ username, botAccount, currentPosting, memoKey
       }
     );
   });
+}
+
+/** Broadcast account_update using Active key with automatic Steem RPC node failover */
+async function broadcastAccountUpdate(activeKey, username, posting, memoKey, jsonMetadata) {
+  const nodes = ['https://api.steemit.com', 'https://api.justyy.com', 'https://api.steem.fans'];
+  let lastErr = null;
+  for (const nodeUrl of nodes) {
+    try {
+      window.steem.api.setOptions({ url: nodeUrl });
+      return await new Promise((resolve, reject) => {
+        window.steem.broadcast.accountUpdate(
+          activeKey,
+          username,
+          undefined,
+          undefined,
+          posting,
+          memoKey,
+          jsonMetadata || '',
+          (err, result) => {
+            if (err) reject(err);
+            else resolve(result);
+          }
+        );
+      });
+    } catch (e) {
+      lastErr = e;
+      const msg = e?.message || String(e);
+      // Fail immediately on key/authority errors without node retry
+      if (msg.includes('missing required active authority') || msg.includes('Invalid WIF') || msg.includes('Missing parameter')) {
+        throw e;
+      }
+    }
+  }
+  throw lastErr || new Error('Broadcast failed across all Steem RPC nodes.');
 }
 
 // ── Components ──────────────────────────────────────────────────────────────
@@ -128,23 +182,24 @@ function VotingPowerMeter({ vp = 0 }) {
   );
 }
 
-function VoteStatusBadge({ status }) {
+function VoteStatusBadge({ status, error }) {
+  const title = error || undefined;
   switch (status) {
     case 'SUCCESS':
-      return <span className="badge badge-success">✅ Voted</span>;
+      return <span className="badge badge-success" title={title}>✅ Voted</span>;
     case 'SKIPPED_VP':
-      return <span className="badge badge-danger">❌ Low VP</span>;
+      return <span className="badge badge-danger" title={title}>❌ Low VP</span>;
     case 'FAILED':
-      return <span className="badge badge-danger">❌ Failed</span>;
+      return <span className="badge badge-danger" title={title} style={{ cursor: error ? 'help' : 'default' }}>❌ Failed</span>;
     case 'SKIPPED_SELF_VOTE':
     case 'SKIPPED_KEYCHAIN':
     case 'SKIPPED':
-      return <span className="badge badge-neutral">Skipped</span>;
+      return <span className="badge badge-neutral" title={title}>Skipped</span>;
     default:
       if (status && String(status).startsWith('SKIPPED')) {
-        return <span className="badge badge-neutral">Skipped</span>;
+        return <span className="badge badge-neutral" title={title}>Skipped</span>;
       }
-      return <span className="badge badge-neutral">{status}</span>;
+      return <span className="badge badge-neutral" title={title}>{status}</span>;
   }
 }
 
@@ -175,7 +230,10 @@ function AuthorityModal({ isOpen, mode, username, botAccount, isProcessing, onCo
         setError('Please enter your private active key.');
         return;
       }
-      onConfirmActiveKey(activeKey.trim(), (err) => {
+      const rawKey = activeKey.trim();
+      // Instantly wipe active key from component state so it never lingers in memory
+      setActiveKey('');
+      onConfirmActiveKey(rawKey, (err) => {
         if (err) setError(err);
       });
     }
@@ -199,7 +257,7 @@ function AuthorityModal({ isOpen, mode, username, botAccount, isProcessing, onCo
           </h3>
           <button
             type="button"
-            onClick={onCancel}
+            onClick={() => { setActiveKey(''); onCancel(); }}
             disabled={isProcessing}
             style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: 0 }}
           >
@@ -209,31 +267,22 @@ function AuthorityModal({ isOpen, mode, username, botAccount, isProcessing, onCo
 
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '1.25rem' }}>
           {isGrant 
-            ? `Authorize @${botAccount} to cast votes on your behalf. This requires an Active Key signature.`
-            : `Remove @${botAccount} from your posting authorities. This requires an Active Key signature.`}
+            ? <>Authorize <strong style={{ color: 'var(--text-primary)' }}>@{botAccount}</strong> to cast votes on your behalf. This requires an Active Key signature.</>
+            : <>Remove <strong style={{ color: 'var(--text-primary)' }}>@{botAccount}</strong> from your posting authorities. This requires an Active Key signature.</>}
         </p>
 
         {/* Tab Selection */}
-        <div style={{ display: 'flex', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', overflow: 'hidden', marginBottom: '1.25rem' }}>
+        <div className="tabs-container" style={{ marginBottom: '1.25rem' }}>
           <button
             type="button"
-            style={{ 
-              padding: '0.65rem', fontWeight: '600', fontSize: '0.875rem', flex: 1, border: 'none', cursor: 'pointer',
-              backgroundColor: authMethod === 'keychain' ? 'var(--color-primary)' : 'transparent',
-              color: authMethod === 'keychain' ? '#fff' : 'var(--text-secondary)'
-            }}
-            onClick={() => { setAuthMethod('keychain'); setError(''); }}
+            className={`tab-button ${authMethod === 'keychain' ? 'active' : ''}`}
+            onClick={() => { setAuthMethod('keychain'); setActiveKey(''); setError(''); }}
           >
             Steem Keychain
           </button>
           <button
             type="button"
-            style={{ 
-              padding: '0.65rem', fontWeight: '600', fontSize: '0.875rem', flex: 1, border: 'none', cursor: 'pointer',
-              borderLeft: '1px solid var(--border-subtle)',
-              backgroundColor: authMethod === 'active_key' ? 'var(--color-primary)' : 'transparent',
-              color: authMethod === 'active_key' ? '#fff' : 'var(--text-secondary)'
-            }}
+            className={`tab-button ${authMethod === 'active_key' ? 'active' : ''}`}
             onClick={() => { setAuthMethod('active_key'); setError(''); }}
           >
             Active Key
@@ -242,10 +291,8 @@ function AuthorityModal({ isOpen, mode, username, botAccount, isProcessing, onCo
 
         <form onSubmit={handleSubmit}>
           {authMethod === 'keychain' ? (
-            <div style={{ padding: '1rem', backgroundColor: 'rgba(255, 255, 255, 0.03)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)', marginBottom: '1.25rem' }}>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: 0 }}>
-                Click below to securely sign the account update transaction using the Steem Keychain extension.
-              </p>
+            <div className="alert-box alert-info" style={{ marginBottom: '1.25rem', fontSize: '0.85rem', lineHeight: '1.45' }}>
+              Click below to securely sign the account update transaction using the Steem Keychain extension.
             </div>
           ) : (
             <div className="form-group" style={{ marginBottom: '1.25rem' }}>
@@ -257,11 +304,21 @@ function AuthorityModal({ isOpen, mode, username, botAccount, isProcessing, onCo
                 value={activeKey}
                 onChange={(e) => setActiveKey(e.target.value)}
                 disabled={isProcessing}
+                autoComplete="off"
                 required
               />
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.4rem', marginBottom: 0 }}>
-                Your active key is used securely to broadcast the transaction and is never stored on the server.
-              </p>
+              <div className="alert-box alert-info" style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '0.5rem',
+                marginTop: '0.65rem',
+                marginBottom: 0,
+                fontSize: '0.8rem',
+                lineHeight: '1.45',
+              }}>
+                <Shield size={14} style={{ flexShrink: 0, marginTop: '2px', color: '#60a5fa' }} />
+                <span><strong style={{ color: 'var(--text-primary)' }}>Client-Side Only:</strong> Your active key broadcasts directly to public Steem RPC nodes (api.steemit.com). It is wiped from memory immediately and NEVER touches our server.</span>
+              </div>
             </div>
           )}
 
@@ -352,9 +409,6 @@ function LoginWall({ botAccount, onAuthenticated }) {
   const [postingKey, setPostingKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  
-  const [showGrantPrompt, setShowGrantPrompt] = useState(false);
-  const [accountData, setAccountData] = useState(null);
 
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
@@ -377,7 +431,18 @@ function LoginWall({ botAccount, onAuthenticated }) {
         return;
       }
 
-      // 2. Handle Keychain Auth Flow
+      // 2. Request single-use cryptographic challenge from server
+      const challengeRes = await post('/auth/challenge', { username: cleanUser });
+      if (!challengeRes.success || !challengeRes.challenge) {
+        setLoading(false);
+        setError(challengeRes.error || 'Failed to request login challenge from server.');
+        return;
+      }
+      const challengeMessage = challengeRes.challenge;
+
+      let signature = '';
+
+      // 3. Handle Keychain Auth Flow
       if (authMethod === 'keychain') {
         if (!hasKeychain()) {
           setLoading(false);
@@ -385,24 +450,15 @@ function LoginWall({ botAccount, onAuthenticated }) {
           return;
         }
 
-        const signResult = await keychainSignLogin(cleanUser);
+        const signResult = await keychainSignMessage(cleanUser, challengeMessage);
         if (!signResult.ok) {
           setLoading(false);
           setError(signResult.error);
           return;
         }
-
-        // Keychain signature proves identity — proceed to login
-        // Authority grant is handled in the dashboard, not during login
-        const loginRes = await post('/login', { username: cleanUser });
-
-        if (loginRes.success) {
-          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
-        } else {
-          setError(loginRes.error || 'Failed to authenticate.');
-        }
+        signature = signResult.signature;
       } 
-      // 3. Handle Posting Key Auth Flow (ZERO-KNOWLEDGE)
+      // 4. Handle Posting Key Auth Flow (ZERO-KNOWLEDGE / CLIENT-SIDE ONLY)
       else {
         if (!postingKey.trim()) {
           setLoading(false);
@@ -411,67 +467,36 @@ function LoginWall({ botAccount, onAuthenticated }) {
         }
 
         try {
-          const pubWif = window.steem.auth.wifToPublic(postingKey.trim());
-          const keyAuths = userCheck.steemProfile.posting.key_auths || [];
-          const isValid = keyAuths.some(([pubKey]) => pubKey === pubWif);
-          if (!isValid) {
-            setLoading(false);
-            setError('Invalid posting key. The key does not match the posting key for this account.');
-            return;
+          const privWif = postingKey.trim();
+          // Instantly wipe posting key from component state so it never lingers in memory
+          setPostingKey('');
+
+          if (!window.steem?.auth?.signature?.signBuffer) {
+            throw new Error('Steem cryptographic module not loaded. Please refresh the page.');
           }
+          const sigObj = window.steem.auth.signature.signBuffer(challengeMessage, privWif);
+          signature = sigObj.toHex();
         } catch (e) {
+          setPostingKey('');
           setLoading(false);
-          setError('Invalid Private Posting Key format.');
+          setError(e.message || 'Failed to sign challenge with Private Posting Key. Please verify key format.');
           return;
         }
-
-        // Key is verified locally, just tell the server we are logged in
-        const loginRes = await post('/login', { username: cleanUser });
-
-        if (loginRes.success) {
-          onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
-        } else {
-          setError(loginRes.error || 'Failed to authenticate session.');
-        }
-      }
-    } catch (err) {
-      setError('Connection to server failed. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleGrantAuthority = async () => {
-    setLoading(true);
-    setError('');
-
-    try {
-      const cleanUser = username.trim().toLowerCase();
-
-      const grantRes = await keychainGrantAuthority({
-        username: cleanUser,
-        botAccount,
-        currentPosting: accountData.posting,
-        memoKey: accountData.memoKey,
-        jsonMetadata: accountData.jsonMetadata,
-      });
-
-      if (!grantRes.ok) {
-        setLoading(false);
-        setError(grantRes.error);
-        return;
       }
 
-      const loginRes = await post('/login', { username: cleanUser });
+      // 5. Submit ONLY username and signature to server to verify identity and issue JWT
+      const loginRes = await post('/login', { username: cleanUser, signature });
 
       if (loginRes.success) {
         onAuthenticated(loginRes.user, loginRes.steemProfile, loginRes.trails, loginRes.token);
       } else {
-        setError(loginRes.error || 'Failed to finalize authentication.');
+        setError(loginRes.error || 'Failed to authenticate.');
       }
     } catch (err) {
-      setError(err.message || 'Authority grant failed.');
+      setError('Connection to server failed. Please try again.');
     } finally {
+      // Ensure posting key state is always completely wiped
+      setPostingKey('');
       setLoading(false);
     }
   };
@@ -495,105 +520,87 @@ function LoginWall({ botAccount, onAuthenticated }) {
           </div>
         )}
 
-        {!showGrantPrompt ? (
-          <form onSubmit={handleLoginSubmit}>
-            <div className="tabs-container">
-              <button
-                type="button"
-                className={`tab-button ${authMethod === 'keychain' ? 'active' : ''}`}
-                onClick={() => { setAuthMethod('keychain'); setError(''); }}
-              >
-                Steem Keychain
-              </button>
-              <button
-                type="button"
-                className={`tab-button ${authMethod === 'key' ? 'active' : ''}`}
-                onClick={() => { setAuthMethod('key'); setError(''); }}
-              >
-                Posting Key
-              </button>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label" htmlFor="login-username-input">
-                <span>Steem Username</span>
-              </label>
-              <input
-                id="login-username-input"
-                type="text"
-                className="form-input"
-                placeholder="Steem Id"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="off"
-                spellCheck="false"
-                required
-              />
-            </div>
-
-            {authMethod === 'key' && (
-              <div className="form-group">
-                <label className="form-label" htmlFor="login-postingkey-input">
-                  <span>Private Posting Key</span>
-                </label>
-                <input
-                  id="login-postingkey-input"
-                  type="password"
-                  className="form-input"
-                  placeholder="5J..."
-                  value={postingKey}
-                  onChange={(e) => setPostingKey(e.target.value)}
-                  required={authMethod === 'key'}
-                />
-              </div>
-            )}
-
-            {authMethod === 'keychain' && (
-              <div className="alert-box alert-info" style={{ fontSize: '0.8rem', lineHeight: '1.45', marginBottom: '1.25rem' }}>
-                Secure 1-click sign in with Steem Keychain. You can grant authority for background voting from the dashboard after logging in.
-              </div>
-            )}
-
-            <button
-              type="submit"
-              id="login-submit-btn"
-              className="btn btn-primary btn-full"
-              disabled={loading}
-              style={{ marginTop: '0.5rem' }}
-            >
-              {loading ? 'Authenticating...' : 'Sign In'}
-            </button>
-          </form>
-        ) : (
-          <div>
-            <div className="alert-box alert-info" style={{ marginBottom: '1.25rem' }}>
-              <div style={{ fontWeight: '600', color: 'var(--text-primary)', marginBottom: '0.35rem' }}>
-                Posting Authority Required
-              </div>
-              <div style={{ fontSize: '0.8rem', lineHeight: '1.45' }}>
-                To allow @{botAccount} to automatically execute trial votes on behalf of @{username}, approve the posting authority request in Steem Keychain (Active key required).
-              </div>
-            </div>
-
+        <form onSubmit={handleLoginSubmit}>
+          <div className="tabs-container">
             <button
               type="button"
-              className="btn btn-primary btn-full"
-              onClick={handleGrantAuthority}
-              disabled={loading}
-              style={{ marginBottom: '0.75rem' }}
+              className={`tab-button ${authMethod === 'keychain' ? 'active' : ''}`}
+              onClick={() => { setAuthMethod('keychain'); setPostingKey(''); setError(''); }}
             >
-              {loading ? 'Confirming in Keychain...' : 'Authorize in Steem Keychain'}
+              Steem Keychain
             </button>
-
             <button
               type="button"
-              className="btn btn-secondary btn-full"
-              onClick={() => setShowGrantPrompt(false)}
+              className={`tab-button ${authMethod === 'key' ? 'active' : ''}`}
+              onClick={() => { setAuthMethod('key'); setError(''); }}
             >
-              Cancel
+              Posting Key
             </button>
           </div>
-        )}
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="login-username-input">
+              <span>Steem Username</span>
+            </label>
+            <input
+              id="login-username-input"
+              type="text"
+              className="form-input"
+              placeholder="Steem Id"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="off"
+              spellCheck="false"
+              required
+            />
+          </div>
+
+          {authMethod === 'key' && (
+            <div className="form-group">
+              <label className="form-label" htmlFor="login-postingkey-input">
+                <span>Private Posting Key</span>
+              </label>
+              <input
+                id="login-postingkey-input"
+                type="password"
+                className="form-input"
+                placeholder="5J..."
+                value={postingKey}
+                onChange={(e) => setPostingKey(e.target.value)}
+                autoComplete="off"
+                required={authMethod === 'key'}
+              />
+              <div className="alert-box alert-info" style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '0.5rem',
+                marginTop: '0.65rem',
+                marginBottom: 0,
+                fontSize: '0.8rem',
+                lineHeight: '1.45',
+              }}>
+                <Shield size={14} style={{ flexShrink: 0, marginTop: '2px', color: '#60a5fa' }} />
+                <span><strong style={{ color: 'var(--text-primary)' }}>Client-Side Only:</strong> Your posting key signs a challenge in browser memory and is wiped immediately. Only the cryptographic signature is sent to the server. Your key NEVER leaves your device.</span>
+              </div>
+            </div>
+          )}
+
+          {authMethod === 'keychain' && (
+            <div className="alert-box alert-info" style={{ fontSize: '0.8rem', lineHeight: '1.45', marginBottom: '1.25rem' }}>
+              Secure 1-click sign in with Steem Keychain. You can grant authority for background voting from the dashboard after logging in.
+            </div>
+          )}
+
+          <button
+            type="submit"
+            id="login-submit-btn"
+            className="btn btn-primary btn-full"
+            disabled={loading}
+            style={{ marginTop: '0.5rem' }}
+          >
+            {loading ? 'Authenticating...' : 'Sign In'}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -955,32 +962,26 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const handleConfirmGrantActiveKey = async (activeKey, setError) => {
     setModalProcessing(true);
     try {
-      const existingAuths = (user.posting?.account_auths ?? [])
+      const freshCheck = await api(`/user/${user.username}`);
+      const currentProfile = freshCheck.steemProfile || steemProfile;
+      if (!currentProfile) throw new Error('Could not fetch account details from blockchain.');
+
+      const existingAuths = (currentProfile.posting?.account_auths ?? [])
         .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase());
 
       const newPosting = {
-        weight_threshold: user.posting?.weight_threshold || 1,
+        weight_threshold: currentProfile.posting?.weight_threshold || 1,
         account_auths: [...existingAuths, [botAccount, 1]].sort((a, b) => a[0].localeCompare(b[0])),
-        key_auths: user.posting?.key_auths || [],
+        key_auths: currentProfile.posting?.key_auths || [],
       };
 
-      window.steem.api.setOptions({ url: 'https://api.steemit.com' });
-      
-      await new Promise((resolve, reject) => {
-        window.steem.broadcast.accountUpdate(
-          activeKey,
-          user.username,
-          undefined,
-          undefined,
-          newPosting,
-          user.memoKey,
-          user.jsonMetadata || '',
-          (err, result) => {
-            if (err) reject(err);
-            else resolve(result);
-          }
-        );
-      });
+      await broadcastAccountUpdate(
+        activeKey,
+        user.username,
+        newPosting,
+        currentProfile.memoKey,
+        currentProfile.jsonMetadata || ''
+      );
 
       showNotification(`Posting authority granted to @${botAccount}. Trail voting is now active.`);
       setShowAuthorityModal(null);
@@ -1151,30 +1152,25 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
   const handleConfirmRevokeActiveKey = async (activeKey, setError) => {
     setModalProcessing(true);
     try {
+      const freshCheck = await api(`/user/${user.username}`);
+      const currentProfile = freshCheck.steemProfile || steemProfile;
+      if (!currentProfile) throw new Error('Could not fetch account details from blockchain.');
+
       const newPosting = {
-        weight_threshold: user.posting?.weight_threshold || 1,
-        account_auths: (user.posting?.account_auths ?? [])
-          .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase()),
-        key_auths: user.posting?.key_auths || [],
+        weight_threshold: currentProfile.posting?.weight_threshold || 1,
+        account_auths: (currentProfile.posting?.account_auths ?? [])
+          .filter(([a]) => a.toLowerCase() !== botAccount.toLowerCase())
+          .sort((a, b) => a[0].localeCompare(b[0])),
+        key_auths: currentProfile.posting?.key_auths || [],
       };
 
-      window.steem.api.setOptions({ url: 'https://api.steemit.com' });
-
-      await new Promise((resolve, reject) => {
-        window.steem.broadcast.accountUpdate(
-          activeKey,
-          user.username,
-          undefined,
-          undefined,
-          newPosting,
-          user.memoKey,
-          user.jsonMetadata || '',
-          (err, result) => {
-            if (err) reject(err);
-            else resolve(result);
-          }
-        );
-      });
+      await broadcastAccountUpdate(
+        activeKey,
+        user.username,
+        newPosting,
+        currentProfile.memoKey,
+        currentProfile.jsonMetadata || ''
+      );
 
       showNotification(`Posting authority revoked from @${botAccount}.`);
       setShowAuthorityModal(null);
@@ -1608,7 +1604,7 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                       <td>@{log.voter}</td>
                       <td>{log.weight}%</td>
                       <td>
-                        <VoteStatusBadge status={log.status} />
+                        <VoteStatusBadge status={log.status} error={log.error} />
                       </td>
                       <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                         {new Date(log.timestamp + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -1699,16 +1695,18 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
 
 // ── Root App Component ──────────────────────────────────────────────────────
 export default function App() {
-  // Check localStorage synchronously to determine if we have a saved session
+  // Check localStorage synchronously to determine if we have a saved session with valid JWT
   const savedSession = localStorage.getItem(SESSION_STORAGE_KEY);
+  const savedToken = localStorage.getItem(JWT_STORAGE_KEY);
+  const hasValidSession = !!(savedSession && savedToken);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [steemProfile, setSteemProfile] = useState(null);
   const [trails, setTrails] = useState([]);
   const [status, setStatus] = useState(null);
   const [logs, setLogs] = useState([]);
-  // If there's a saved session, we need to restore it before showing anything
-  const [sessionRestored, setSessionRestored] = useState(!savedSession);
+  // If there's a saved session with token, restore it before rendering dashboard
+  const [sessionRestored, setSessionRestored] = useState(!hasValidSession);
   const [initialLoading, setInitialLoading] = useState(true);
 
   // Stable ref to avoid dependency cycles
@@ -1727,7 +1725,7 @@ export default function App() {
     try {
       const [statusRes, logsRes] = await Promise.all([
         api('/status').catch(() => null),
-        api('/logs?limit=30').catch(() => null),
+        api('/logs?limit=50').catch(() => null),
       ]);
 
       if (statusRes?.success) setStatus(statusRes);
@@ -1737,7 +1735,8 @@ export default function App() {
       if (loggedOutRef.current) return;
 
       const sessionUser = targetUsername || currentUserRef.current?.username || localStorage.getItem(SESSION_STORAGE_KEY);
-      if (sessionUser) {
+      const token = localStorage.getItem(JWT_STORAGE_KEY);
+      if (sessionUser && token) {
         const userRes = await api(`/user/${sessionUser}`).catch(() => null);
 
         // Re-check after async call — user may have logged out while we were fetching
@@ -1751,8 +1750,12 @@ export default function App() {
         } else {
           // User deleted or not found on server — clear session
           localStorage.removeItem(SESSION_STORAGE_KEY);
+          localStorage.removeItem(JWT_STORAGE_KEY);
           setCurrentUser(null);
         }
+      } else if (sessionUser && !token) {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        setCurrentUser(null);
       }
     } catch (err) {
       console.error('Data refresh error:', err);
@@ -1816,11 +1819,18 @@ export default function App() {
     };
   }, []);
 
-  // Initial load + WS connection
+  // Initial load + WS connection + auth expiration listener
   useEffect(() => {
     loadDataOnce();
     connectWs();
+
+    const onAuthExpired = () => {
+      handleLogout();
+    };
+    window.addEventListener('steem_auth_expired', onAuthExpired);
+
     return () => {
+      window.removeEventListener('steem_auth_expired', onAuthExpired);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) wsRef.current.close();
     };

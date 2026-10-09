@@ -1,6 +1,9 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import ecc from 'steem/lib/auth/ecc/index.js';
+const { Signature } = ecc.default || ecc;
+
 export const BOT_ACCOUNT    = (process.env.BOT_ACCOUNT    || '').toLowerCase();
 export const BOT_POSTING_KEY = (process.env.BOT_POSTING_KEY || '').trim();
 export const TRAIL_LEADER    = (process.env.TRAIL_LEADER   || 'dhaka.witness').toLowerCase().trim();
@@ -77,7 +80,7 @@ export function calcVP(acc) {
     return parseFloat((currentVp / 100).toFixed(2));
   }
 
-  return 100;
+  return 0;
 }
 
 // ── Reputation ────────────────────────────────────────────────────────────────
@@ -133,14 +136,18 @@ export async function hasBotAuthority(username) {
  * @param {number} weight   - Vote weight: 1 to 100 (upvote) or -1 to -100 (downvote)
  */
 export async function voteOnBehalf({ voter, author, permlink, weight }) {
-  const key = (BOT_POSTING_KEY || '').trim();
+  const key = (BOT_POSTING_KEY || '').trim().replace(/^['"]/, '').replace(/['"]$/, '');
   if (!key) throw new Error('BOT_POSTING_KEY not configured in .env');
+
+  const s = await steemJs();
+  if (!s.auth.isWif(key)) {
+    return { success: false, error: 'Invalid BOT_POSTING_KEY in .env (must be a valid 51-character Steem private posting key starting with 5)' };
+  }
 
   // Preserve vote direction: positive = upvote, negative = downvote
   const sign = weight < 0 ? -1 : 1;
   const absWeight = Math.min(100, Math.max(0.01, Math.abs(weight)));
   const steemWeight = Math.round(sign * absWeight * 100); // -10000 to -100 or 100 to 10000
-  const s = await steemJs();
 
   // Attempt broadcast with automated node failover
   let lastError = null;
@@ -188,6 +195,33 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
   }
 
   return { success: false, error: lastError || 'Broadcast failed across all RPC nodes' };
+}
+
+/**
+ * Cryptographically verifies that a signature for a given message was produced by
+ * a key authorized by the Steem account (posting, active, or owner keys).
+ *
+ * @param {string} message - Plaintext challenge message
+ * @param {string} signatureHex - Hex-encoded ECDSA signature
+ * @param {object} account - Raw Steem account object from blockchain
+ * @returns {boolean} True if signature is valid and belongs to the account
+ */
+export function verifySignature(message, signatureHex, account) {
+  if (!message || !signatureHex || !account) return false;
+  try {
+    const sig = Signature.fromHex(signatureHex);
+    const recoveredPubKey = sig.recoverPublicKeyFromBuffer(message).toString();
+
+    const postingKeys = (account.posting?.key_auths || []).map(([k]) => k);
+    const activeKeys  = (account.active?.key_auths  || []).map(([k]) => k);
+    const ownerKeys   = (account.owner?.key_auths   || []).map(([k]) => k);
+
+    const authorizedKeys = [...postingKeys, ...activeKeys, ...ownerKeys];
+    return authorizedKeys.includes(recoveredPubKey);
+  } catch (err) {
+    console.error('[steemClient] verifySignature error:', err.message);
+    return false;
+  }
 }
 
 

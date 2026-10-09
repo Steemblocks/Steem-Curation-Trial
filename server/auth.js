@@ -5,12 +5,22 @@
  * Issues tokens on login, validates on all mutating endpoints.
  */
 
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'steem_curation_trial_jwt_secret_change_me';
+// If JWT_SECRET is unset or using default placeholder, generate a cryptographically secure random secret
+const RUNTIME_RANDOM_SECRET = crypto.randomBytes(32).toString('hex');
+const JWT_SECRET = (process.env.JWT_SECRET && process.env.JWT_SECRET !== 'steem_curation_trial_jwt_secret_change_me')
+  ? process.env.JWT_SECRET
+  : RUNTIME_RANDOM_SECRET;
+
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '24h';
+
+if (JWT_SECRET === RUNTIME_RANDOM_SECRET) {
+  console.log('[SECURITY] Generated secure in-memory JWT_SECRET. (Set JWT_SECRET in .env to persist across server restarts).');
+}
 
 /**
  * Generate a JWT token for a verified user.
@@ -21,7 +31,7 @@ export function generateToken(username) {
   return jwt.sign(
     { username: username.toLowerCase() },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRY }
+    { expiresIn: JWT_EXPIRY, algorithm: 'HS256' }
   );
 }
 
@@ -38,7 +48,8 @@ export function requireAuth(req, res, next) {
 
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    // Explicitly restrict algorithm to HS256 to prevent algorithm confusion attacks
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
     req.authUser = decoded.username;
     next();
   } catch (err) {
@@ -55,10 +66,11 @@ export function requireAuth(req, res, next) {
  * Prevents users from modifying other users' data.
  */
 export function requireSelf(req, res, next) {
-  const bodyUser = (req.body.username || '').trim().toLowerCase();
-  if (!bodyUser) {
-    return res.status(400).json({ success: false, error: 'Username required.' });
+  const rawUser = req.body?.username;
+  if (typeof rawUser !== 'string' || !rawUser.trim()) {
+    return res.status(400).json({ success: false, error: 'Valid username required.' });
   }
+  const bodyUser = rawUser.trim().toLowerCase();
   if (req.authUser !== bodyUser) {
     return res.status(403).json({ success: false, error: 'You can only modify your own account.' });
   }
