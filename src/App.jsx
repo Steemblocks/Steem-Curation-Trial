@@ -607,9 +607,6 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
   const [minVp, setMinVp] = useState(80);
   const [allowUpvotes, setAllowUpvotes] = useState(true);
   const [allowDownvotes, setAllowDownvotes] = useState(true);
-  const [whitelist, setWhitelist] = useState('');
-  const [blacklist, setBlacklist] = useState('');
-  const [maxDailyVotes, setMaxDailyVotes] = useState(0);
   
   // Real-time verification state
   const [checking, setChecking] = useState(false);
@@ -667,9 +664,9 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
         minVp: parseInt(minVp, 10),
         allowUpvotes,
         allowDownvotes,
-        maxDailyVotes: parseInt(maxDailyVotes, 10) || 0,
-        whitelist,
-        blacklist
+        maxDailyVotes: 0,
+        whitelist: '',
+        blacklist: ''
       });
       // Reset form
       setTargetAccount('');
@@ -833,46 +830,7 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
             </label>
           </div>
 
-          <div className="form-group" style={{ marginBottom: '1rem' }}>
-            <label className="form-label" htmlFor="maxDailyVotes">Max Daily Votes (0 for unlimited)</label>
-            <input
-              id="maxDailyVotes"
-              type="number"
-              min="0"
-              step="1"
-              className="form-input"
-              value={maxDailyVotes}
-              onChange={(e) => setMaxDailyVotes(e.target.value)}
-            />
-          </div>
 
-          <div className="form-group" style={{ marginBottom: '1rem' }}>
-            <label className="form-label" htmlFor="whitelist">Author Whitelist (optional, comma-separated)</label>
-            <input
-              id="whitelist"
-              type="text"
-              className="form-input"
-              placeholder="e.g. steemcurator01, blocktrades"
-              value={whitelist}
-              onChange={(e) => setWhitelist(e.target.value)}
-              autoComplete="off"
-              spellCheck="false"
-            />
-          </div>
-
-          <div className="form-group" style={{ marginBottom: '1.25rem' }}>
-            <label className="form-label" htmlFor="blacklist">Author Blacklist (optional, comma-separated)</label>
-            <input
-              id="blacklist"
-              type="text"
-              className="form-input"
-              placeholder="e.g. spammer, badactor"
-              value={blacklist}
-              onChange={(e) => setBlacklist(e.target.value)}
-              autoComplete="off"
-              spellCheck="false"
-            />
-          </div>
 
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem' }}>
             <button
