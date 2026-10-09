@@ -122,6 +122,20 @@ export function initDb() {
     console.warn('[DB Migration] Note:', err.message);
   }
 
+  // Migration: sanitize historical blacklist logs to protect privacy
+  try {
+    const sanitized = db.prepare(`
+      UPDATE vote_logs 
+      SET status = 'SKIPPED', error = NULL
+      WHERE status = 'SKIPPED_BLACKLIST' OR error LIKE '%blacklist%'
+    `).run();
+    if (sanitized.changes > 0) {
+      console.log(`[DB Migration] Sanitized ${sanitized.changes} historical blacklist vote log(s) for privacy.`);
+    }
+  } catch (err) {
+    console.warn('[DB Migration] Note:', err.message);
+  }
+
   console.log('[DB] Multi-trail tables ready.');
 }
 

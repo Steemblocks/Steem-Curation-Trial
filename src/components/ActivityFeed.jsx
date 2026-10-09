@@ -35,6 +35,7 @@ export default function ActivityFeed({ logs, onRefresh }) {
         return <span className="badge badge-danger">❌ Failed</span>;
       case 'SKIPPED_SELF_VOTE':
       case 'SKIPPED_KEYCHAIN':
+      case 'SKIPPED_BLACKLIST':
       case 'SKIPPED':
         return <span className="badge badge-neutral">Skipped</span>;
       default:

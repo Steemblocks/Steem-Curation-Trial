@@ -183,7 +183,9 @@ function VotingPowerMeter({ vp = 0 }) {
 }
 
 function VoteStatusBadge({ status, error }) {
-  const title = error || undefined;
+  // Never show blacklist details in tooltip for privacy protection
+  const isBlacklist = status === 'SKIPPED_BLACKLIST' || (error && error.toLowerCase().includes('blacklist'));
+  const title = isBlacklist ? undefined : (error || undefined);
   switch (status) {
     case 'SUCCESS':
       return <span className="badge badge-success" title={title}>✅ Voted</span>;
@@ -193,6 +195,7 @@ function VoteStatusBadge({ status, error }) {
       return <span className="badge badge-danger" title={title} style={{ cursor: error ? 'help' : 'default' }}>❌ Failed</span>;
     case 'SKIPPED_SELF_VOTE':
     case 'SKIPPED_KEYCHAIN':
+    case 'SKIPPED_BLACKLIST':
     case 'SKIPPED':
       return <span className="badge badge-neutral" title={title}>Skipped</span>;
     default:

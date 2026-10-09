@@ -83,13 +83,14 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
       }
     }
 
-    // Enforce blacklist
+    // Enforce blacklist (privacy-protected: reason is never exposed in logs)
     if (user.blacklist && user.blacklist.trim().length > 0) {
-      const blacklistArray = user.blacklist.split(',');
+      const blacklistArray = user.blacklist.split(',').map(cleanName).filter(Boolean);
       if (blacklistArray.includes(targetAuthor)) {
-        console.log(`[VoteEngine] @${user.username}: Skipped vote on @${author} (in blacklist)`);
+        console.log(`[VoteEngine] @${user.username}: Skipped vote on @${author} (blacklist rule)`);
         const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
-        logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED_BLACKLIST', `Author @${author} is on your blacklist`);
+        // Privacy protection: log as generic SKIPPED with null error so blacklisted accounts are not exposed
+        logAndBroadcast(leader, author, permlink, user.username, effectiveWeight, 'SKIPPED', null);
         continue;
       }
     }
