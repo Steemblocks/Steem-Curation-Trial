@@ -997,7 +997,17 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
     }
   };
 
-const handleAddTrail = async ({ trailAccount, weight, delay, minVp, allowUpvotes, allowDownvotes }) => {
+  const handleAddTrail = async ({
+    trailAccount,
+    weight,
+    delay,
+    minVp,
+    allowUpvotes,
+    allowDownvotes,
+    maxDailyVotes = 0,
+    whitelist = '',
+    blacklist = ''
+  }) => {
     const res = await post('/trails/add', {
       username: user.username,
       trailAccount,
