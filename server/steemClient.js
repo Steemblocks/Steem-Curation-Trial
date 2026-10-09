@@ -106,6 +106,19 @@ export async function getBlock(blockNum) {
   }
 }
 
+// ── Fetch active votes on a post ─────────────────────────────────────────────
+export async function getActiveVotes(author, permlink) {
+  try {
+    const cleanAuthor = (author || '').toString().replace(/^@/, '').trim().toLowerCase();
+    const cleanPerm = (permlink || '').toString().trim();
+    if (!cleanAuthor || !cleanPerm) return [];
+    const votes = await rpc('condenser_api.get_active_votes', [cleanAuthor, cleanPerm]);
+    return Array.isArray(votes) ? votes : [];
+  } catch (err) {
+    return [];
+  }
+}
+
 // ── steem-js lazy loader ──────────────────────────────────────────────────────
 let _steem = null;
 export async function steemJs() {
@@ -144,6 +157,10 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
     return { success: false, error: 'Invalid BOT_POSTING_KEY in .env (must be a valid 51-character Steem private posting key starting with 5)' };
   }
 
+  const cleanVoter = (voter || '').toString().replace(/^@/, '').trim().toLowerCase();
+  const cleanAuthor = (author || '').toString().replace(/^@/, '').trim().toLowerCase();
+  const cleanPerm = (permlink || '').toString().trim();
+
   // Preserve vote direction: positive = upvote, negative = downvote
   const sign = weight < 0 ? -1 : 1;
   const absWeight = Math.min(100, Math.max(0.01, Math.abs(weight)));
@@ -157,7 +174,7 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
       s.api.setOptions({ url: currentNode });
 
       const res = await new Promise((resolve) => {
-        s.broadcast.vote(key, voter, author, permlink, steemWeight, (err, result) => {
+        s.broadcast.vote(key, cleanVoter, cleanAuthor, cleanPerm, steemWeight, (err, result) => {
           if (err) {
             resolve({ success: false, error: err.message || String(err) });
           } else {
@@ -170,10 +187,17 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
         return res;
       }
 
-      // If it's a permanent error from the blockchain (not a node network issue), don't failover
       const errMsg = res.error || '';
+
+      // If blockchain states the vote is identical, the vote is ALREADY confirmed on-chain.
+      // This happens if node 0 sent the transaction into the block/mempool but timed out before returning HTTP 200,
+      // or if another trail leader previously triggered the same vote weight.
+      if (errMsg.includes('identical to this vote')) {
+        return { success: true, txId: 'confirmed_onchain' };
+      }
+
+      // If it's a permanent blockchain rejection (not an RPC network issue), don't failover
       if (
-        errMsg.includes('identical to this vote') ||
         errMsg.includes('STEEM_MIN_VOTE_INTERVAL_SEC') ||
         errMsg.includes('Can only vote once every 3 seconds') ||
         errMsg.includes('missing required posting authority') ||
@@ -192,6 +216,18 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
       rotate();
       await new Promise(r => setTimeout(r, 400));
     }
+  }
+
+  // Final verification check: if all nodes failed or timed out at the HTTP layer,
+  // query on-chain active votes to see if the transaction actually went through.
+  try {
+    const activeVotes = await getActiveVotes(cleanAuthor, cleanPerm);
+    const matched = activeVotes.find(v => (v.voter || '').toLowerCase() === cleanVoter);
+    if (matched && Math.abs(matched.percent - steemWeight) < 10) {
+      return { success: true, txId: 'confirmed_onchain' };
+    }
+  } catch (verifyErr) {
+    // Non-blocking verification failure
   }
 
   return { success: false, error: lastError || 'Broadcast failed across all RPC nodes' };

@@ -20,6 +20,8 @@ import { generateToken, requireAuth, requireSelf } from './auth.js';
 import { createChallenge, consumeChallenge } from './challenge.js';
 
 const app  = express();
+// Enable trust proxy so express-rate-limit correctly identifies IPs behind Docker / Nginx
+app.set('trust proxy', 1);
 const server = createServer(app);
 const PORT = process.env.PORT || 5000;
 

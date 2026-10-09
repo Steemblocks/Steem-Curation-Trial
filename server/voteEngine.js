@@ -1,5 +1,5 @@
 import { getActiveFollowers, logVote, getVoteLogs, getDailyVoteCount } from './db.js';
-import { getAccount, calcVP, hasBotAuthority, voteOnBehalf, BOT_ACCOUNT } from './steemClient.js';
+import { getAccount, calcVP, hasBotAuthority, voteOnBehalf, getActiveVotes, BOT_ACCOUNT } from './steemClient.js';
 import { broadcastAll } from './wsHub.js';
 
 const cleanName = (name) => (name || '').toString().replace(/^@/, '').trim().toLowerCase();
@@ -8,8 +8,8 @@ const cleanName = (name) => (name || '').toString().replace(/^@/, '').trim().toL
 function calcEffectiveWeight(userWeight, leaderWeight) {
   const raw = ((userWeight ?? 100) / 100) * leaderWeight;
   if (Math.abs(raw) < 0.01) return 0;
-  // Ensure we don't accidentally exceed max bounds, though steemClient handles this
-  return raw;
+  // Round to 2 decimal places to eliminate IEEE 754 floating-point artifacts (e.g. 6.300000000000001)
+  return Math.round(raw * 100) / 100;
 }
 
 // Safe rate-limiting interval for Steem blockchain (Steem consensus requires >= 3.0s between votes)
@@ -96,6 +96,19 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
 
     const delayMs = (user.delay ?? 0) * 60_000;
     const executeAfter = Date.now() + delayMs;
+
+    // Prevent queuing redundant identical votes if multiple leaders vote on the same post
+    const effectiveWeight = calcEffectiveWeight(user.weight, leaderWeight);
+    const isAlreadyQueued = voteQueue.some(job => 
+      cleanName(job.user.username) === voter &&
+      cleanName(job.author) === targetAuthor &&
+      (job.permlink || '').trim() === (permlink || '').trim() &&
+      calcEffectiveWeight(job.user.weight, job.leaderWeight) === effectiveWeight
+    );
+    if (isAlreadyQueued) {
+      console.log(`[VoteEngine] @${voter}: Identical vote (${effectiveWeight}%) already queued for @${author}/${permlink} — skipped duplicate enqueue`);
+      continue;
+    }
 
     // Guard against memory exhaustion by capping in-memory queue size
     if (voteQueue.length >= 2000) {
@@ -222,14 +235,29 @@ async function executeVote({ user, leader, author, permlink, leaderWeight }) {
         `@${BOT_ACCOUNT} not in posting_auths of @${username} — authority revoked?`);
     }
 
+    // 2.5 Pre-broadcast check: has the voter already cast an identical vote on this post?
+    // Avoids redundant transactions and unnecessary rate-limiting.
+    try {
+      const activeVotes = await getActiveVotes(author, permlink);
+      const existing = activeVotes.find(v => (v.voter || '').toLowerCase() === voter);
+      const targetSteemWeight = Math.round((effectiveWeight < 0 ? -1 : 1) * Math.min(100, Math.max(0.01, Math.abs(effectiveWeight))) * 100);
+      if (existing && Math.abs(existing.percent - targetSteemWeight) < 10) {
+        console.log(`[VoteEngine] ✓ @${username} already voted on @${author}/${permlink} with identical weight (${effectiveWeight}%) — confirmed`);
+        return logAndBroadcast(leader, author, permlink, username, effectiveWeight, 'SUCCESS', null, 'already_voted');
+      }
+    } catch (e) {
+      // Non-blocking pre-check failure
+    }
+
     // 3. Broadcast vote on behalf of user
     console.log(`[VoteEngine] 🚀 Broadcasting vote: @${username} → @${author}/${permlink} (${effectiveWeight}%)`);
     const result = await voteOnBehalf({ voter: username, author, permlink, weight: effectiveWeight });
 
     // 4. Log result
     if (result.success) {
-      console.log(`[VoteEngine] ✓ @${username} successfully voted @${author}/${permlink} (tx: ${result.txId})`);
-      logAndBroadcast(leader, author, permlink, username, effectiveWeight, 'SUCCESS', null, result.txId);
+      const txId = result.txId || 'broadcast_ok';
+      console.log(`[VoteEngine] ✓ @${username} successfully voted @${author}/${permlink} (tx: ${txId})`);
+      logAndBroadcast(leader, author, permlink, username, effectiveWeight, 'SUCCESS', null, txId);
     } else {
       console.error(`[VoteEngine] ✗ @${username} vote failed: ${result.error}`);
       logAndBroadcast(leader, author, permlink, username, effectiveWeight, 'FAILED', result.error);

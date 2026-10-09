@@ -108,6 +108,20 @@ export function initDb() {
   db.exec(`CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT);`);
   db.prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES ('synced_block', '0')`).run();
 
+  // Migration: heal historical false-failure logs where vote actually succeeded on blockchain (identical vote assertion)
+  try {
+    const fixed = db.prepare(`
+      UPDATE vote_logs 
+      SET status = 'SUCCESS', error = NULL, tx_id = COALESCE(tx_id, 'confirmed_onchain')
+      WHERE status = 'FAILED' AND error LIKE '%identical to this vote%'
+    `).run();
+    if (fixed.changes > 0) {
+      console.log(`[DB Migration] Healed ${fixed.changes} historical vote log(s) that succeeded on blockchain.`);
+    }
+  } catch (err) {
+    console.warn('[DB Migration] Note:', err.message);
+  }
+
   console.log('[DB] Multi-trail tables ready.');
 }
 

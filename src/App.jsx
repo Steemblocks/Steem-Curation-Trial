@@ -1602,7 +1602,7 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                         </a>
                       </td>
                       <td>@{log.voter}</td>
-                      <td>{log.weight}%</td>
+                      <td>{parseFloat(Number(log.weight || 0).toFixed(2))}%</td>
                       <td>
                         <VoteStatusBadge status={log.status} error={log.error} />
                       </td>
