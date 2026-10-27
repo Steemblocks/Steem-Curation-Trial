@@ -1,4 +1,4 @@
-import { getActiveFollowers, logVote, getVoteLogs, getDailyVoteCount } from './db.js';
+import { getActiveFollowers, logVote, getVoteLogs, getDailyVoteCount, getActiveAutoVoters, hasAutoVoteLog } from './db.js';
 import { getAccount, calcVP, hasBotAuthority, voteOnBehalf, getActiveVotes, BOT_ACCOUNT } from './steemClient.js';
 import { broadcastAll } from './wsHub.js';
 
@@ -128,6 +128,56 @@ export async function dispatchTrailVotes({ leader, author, permlink, leaderWeigh
     });
 
     console.log(`[VoteEngine] Enqueued vote for @${voter} (delay: ${user.delay || 0}m, execute in ${Math.round(delayMs / 1000)}s)`);
+  }
+
+  processVoteQueue();
+}
+
+/**
+ * Auto-vote: a targeted author published a new post. Queue a vote for every user targeting them.
+ * Jobs reuse the trail queue; leader is tagged `auto:<author>` so logs/limits stay separate.
+ */
+export async function dispatchAutoVotes({ author, permlink }) {
+  const targets = getActiveAutoVoters(author);
+  if (!targets.length) return;
+
+  const targetAuthor = cleanName(author);
+  const leader = `auto:${targetAuthor}`;
+  console.log(`[AutoVote] New post @${author}/${permlink} — ${targets.length} subscriber(s)`);
+
+  for (const t of targets) {
+    const voter = cleanName(t.username);
+
+    if (voter === targetAuthor) {
+      logAndBroadcast(leader, author, permlink, t.username, t.weight, 'SKIPPED_SELF_VOTE', 'Self-voting restricted on own post');
+      continue;
+    }
+    if (hasAutoVoteLog(voter, targetAuthor, permlink)) continue;
+
+    if (t.max_daily_votes > 0 && getDailyVoteCount(t.username, leader) >= t.max_daily_votes) {
+      logAndBroadcast(leader, author, permlink, t.username, t.weight, 'SKIPPED_LIMIT', `Daily limit of ${t.max_daily_votes} votes reached`);
+      continue;
+    }
+
+    const alreadyQueued = voteQueue.some(job =>
+      cleanName(job.user.username) === voter && cleanName(job.author) === targetAuthor && job.permlink === permlink
+    );
+    if (alreadyQueued) continue;
+
+    if (voteQueue.length >= 2000) voteQueue.shift();
+
+    // Steem requires a short wait before voting on a brand-new post; minimum 4s.
+    const delayMs = Math.max(4000, (t.delay ?? 0) * 60_000);
+    voteQueue.push({
+      user: { username: t.username, weight: t.weight, delay: t.delay, min_vp: t.min_vp },
+      leader,
+      author,
+      permlink,
+      leaderWeight: 100,
+      executeAfter: Date.now() + delayMs,
+      createdAt: Date.now()
+    });
+    console.log(`[AutoVote] Enqueued @${voter} → @${author}/${permlink} (${t.weight}%, in ${Math.round(delayMs / 1000)}s)`);
   }
 
   processVoteQueue();

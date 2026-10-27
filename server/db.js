@@ -13,6 +13,7 @@ if (!dbPath || !fs.existsSync(path.dirname(path.resolve(dbPath)))) {
 
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 console.log('[DB] Connected:', dbPath);
 
 export function initDb() {
@@ -104,6 +105,47 @@ export function initDb() {
     );
   `);
 
+  // Auto-vote targets — users vote directly on any author's new posts
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auto_vote_targets (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      username        TEXT NOT NULL,
+      target_author   TEXT NOT NULL,
+      weight          INTEGER NOT NULL DEFAULT 100,
+      delay           INTEGER NOT NULL DEFAULT 0,
+      min_vp          INTEGER NOT NULL DEFAULT 80,
+      max_daily_votes INTEGER NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'active',
+      created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(username, target_author),
+      FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+    );
+  `);
+
+  // Auto-redeem (auto-claim rewards) settings + history
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auto_redeem (
+      username       TEXT PRIMARY KEY,
+      enabled        INTEGER NOT NULL DEFAULT 0,
+      interval_hours INTEGER NOT NULL DEFAULT 24,
+      last_run       DATETIME,
+      updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS redeem_logs (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      username  TEXT NOT NULL,
+      steem     TEXT,
+      sbd       TEXT,
+      vests     TEXT,
+      status    TEXT NOT NULL,
+      error     TEXT,
+      source    TEXT NOT NULL DEFAULT 'auto',
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
   // System state (k/v)
   db.exec(`CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT);`);
   db.prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES ('synced_block', '0')`).run();
@@ -134,6 +176,23 @@ export function initDb() {
     }
   } catch (err) {
     console.warn('[DB Migration] Note:', err.message);
+  }
+
+  // Migration (security): purge legacy encrypted posting keys. The app now uses
+  // posting authority only, so these are never read — wipe them from disk entirely.
+  try {
+    const userCols = db.prepare("PRAGMA table_info(users)").all();
+    if (userCols.some(c => c.name === 'posting_key_encrypted')) {
+      db.pragma('secure_delete = ON');                       // zero freed pages instead of leaving data behind
+      db.exec(`UPDATE users SET posting_key_encrypted = NULL`);
+      db.exec(`ALTER TABLE users DROP COLUMN posting_key_encrypted`);
+      db.pragma('wal_checkpoint(TRUNCATE)');                  // flush + empty the WAL (it held old copies)
+      db.exec('VACUUM');                                      // rewrite the file so no residue remains
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      console.log('[DB Migration] Purged legacy posting_key_encrypted column.');
+    }
+  } catch (err) {
+    console.warn('[DB Migration] Key purge note:', err.message);
   }
 
   console.log('[DB] Multi-trail tables ready.');
@@ -178,6 +237,9 @@ export function updateUserStatus(username, status) {
 export function deleteUser(username) {
   const u = username.toLowerCase();
   db.prepare(`DELETE FROM user_trails WHERE username = ?`).run(u);
+  db.prepare(`DELETE FROM auto_vote_targets WHERE username = ?`).run(u);
+  db.prepare(`DELETE FROM auto_redeem WHERE username = ?`).run(u);
+  db.prepare(`DELETE FROM redeem_logs WHERE username = ?`).run(u);
   return db.prepare(`DELETE FROM users WHERE username = ?`).run(u);
 }
 
@@ -295,6 +357,91 @@ export function getWatchedAccounts() {
   return rows.map(r => r.trail_account);
 }
 
+// ── Auto-vote target methods ──────────────────────────────────────────────────
+
+const TARGET_COLS = `id, username, target_author, weight, delay, min_vp, max_daily_votes, status, created_at, updated_at`;
+
+export function getAutoVoteTargets(username) {
+  return db.prepare(`SELECT ${TARGET_COLS} FROM auto_vote_targets WHERE username = ? ORDER BY created_at ASC`).all(username.toLowerCase());
+}
+
+export function addAutoVoteTarget({ username, targetAuthor, weight = 100, delay = 0, minVp = 80, maxDailyVotes = 0 }) {
+  const u = username.trim().toLowerCase();
+  const a = targetAuthor.trim().toLowerCase();
+  db.prepare(`
+    INSERT INTO auto_vote_targets (username, target_author, weight, delay, min_vp, max_daily_votes, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'active')
+    ON CONFLICT(username, target_author) DO UPDATE SET
+      weight = excluded.weight, delay = excluded.delay, min_vp = excluded.min_vp,
+      max_daily_votes = excluded.max_daily_votes, status = 'active', updated_at = CURRENT_TIMESTAMP
+  `).run(u, a, weight, delay, minVp, maxDailyVotes);
+  return getAutoVoteTargets(u);
+}
+
+export function updateAutoVoteTarget({ id, username, weight, delay, minVp, maxDailyVotes, status }) {
+  const u = username.trim().toLowerCase();
+  const existing = db.prepare(`SELECT id FROM auto_vote_targets WHERE id = ? AND username = ?`).get(id, u);
+  if (!existing) return null;
+  db.prepare(`
+    UPDATE auto_vote_targets SET
+      weight = COALESCE(?, weight),
+      delay = COALESCE(?, delay),
+      min_vp = COALESCE(?, min_vp),
+      max_daily_votes = COALESCE(?, max_daily_votes),
+      status = COALESCE(?, status),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND username = ?
+  `).run(
+    weight ?? null, delay ?? null, minVp ?? null, maxDailyVotes ?? null, status ?? null, id, u
+  );
+  return getAutoVoteTargets(u);
+}
+
+export function deleteAutoVoteTarget({ id, username }) {
+  const u = username.trim().toLowerCase();
+  db.prepare(`DELETE FROM auto_vote_targets WHERE id = ? AND username = ?`).run(id, u);
+  return getAutoVoteTargets(u);
+}
+
+/** Active targets watching a given author (joined with active users). */
+export function getActiveAutoVoters(author) {
+  return db.prepare(`
+    SELECT u.username, t.id as target_id, t.target_author, t.weight, t.delay, t.min_vp, t.max_daily_votes
+    FROM auto_vote_targets t
+    JOIN users u ON u.username = t.username
+    WHERE t.status = 'active' AND u.status = 'active' AND t.target_author = ?
+  `).all(author.toLowerCase());
+}
+
+export function getAutoVoteWatchedAuthors() {
+  return db.prepare(`
+    SELECT DISTINCT t.target_author FROM auto_vote_targets t
+    JOIN users u ON u.username = t.username
+    WHERE t.status = 'active' AND u.status = 'active'
+  `).all().map(r => r.target_author);
+}
+
+/** Has this voter already got an auto-vote log row for this post? (dedupe) */
+export function hasAutoVoteLog(voter, author, permlink) {
+  return !!db.prepare(`
+    SELECT 1 FROM vote_logs WHERE voter = ? AND author = ? AND permlink = ? AND leader LIKE 'auto:%' LIMIT 1
+  `).get(voter.toLowerCase(), author.toLowerCase(), permlink);
+}
+
+/** Recent auto-vote activity for a user, plus per-author counts. */
+export function getAutoVoteActivity(username, limit = 50) {
+  const u = username.toLowerCase();
+  const logs = db.prepare(`
+    SELECT * FROM vote_logs WHERE voter = ? AND leader LIKE 'auto:%' ORDER BY timestamp DESC, id DESC LIMIT ?
+  `).all(u, limit);
+  const perAuthor = db.prepare(`
+    SELECT author, COUNT(*) as total,
+      SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as success
+    FROM vote_logs WHERE voter = ? AND leader LIKE 'auto:%' GROUP BY author
+  `).all(u);
+  return { logs, perAuthor };
+}
+
 // ── Vote logs & stats ─────────────────────────────────────────────────────────
 
 export function logVote({ leader, author, permlink, voter, weight, status, txId = null, error = null }) {
@@ -333,11 +480,138 @@ export function getTotalVoteLogsCount() {
 export function getVoteStats() {
   return {
     totalVotes:    db.prepare(`SELECT COUNT(*) c FROM vote_logs WHERE status = 'SUCCESS'`).get().c,
-    activeMembers: db.prepare(`SELECT COUNT(DISTINCT username) c FROM user_trails WHERE status = 'active'`).get().c,
+    // Must match getDashboardStats().activeUsers — only count globally active users
+    activeMembers: db.prepare(`SELECT COUNT(*) c FROM users WHERE status = 'active'`).get().c,
   };
 }
 
+// ── Dashboard aggregate stats ────────────────────────────────────────────────
+
+/**
+ * @param {number} tzOffsetMin - viewer's offset from UTC in minutes (e.g. +360 for UTC+6).
+ *   Timestamps are stored in UTC; this shifts day boundaries to the viewer's local midnight.
+ */
+export function getDashboardStats(tzOffsetMin = 0, username = null) {
+  const tz = Number.isInteger(tzOffsetMin) && Math.abs(tzOffsetMin) <= 840 ? tzOffsetMin : 0;
+  const mod = `${tz >= 0 ? '+' : ''}${tz} minutes`; // SQLite date modifier
+
+  // When username is provided, scope all vote_logs queries to that user
+  const userFilter = username ? 'AND voter = @user' : '';
+  const userParam = username ? { user: username.toLowerCase() } : {};
+
+  // Overall vote status breakdown
+  const breakdown = db.prepare(`
+    SELECT
+      SUM(CASE WHEN status = 'SUCCESS'            THEN 1 ELSE 0 END) as success,
+      SUM(CASE WHEN status = 'FAILED'             THEN 1 ELSE 0 END) as failed,
+      SUM(CASE WHEN status LIKE 'SKIPPED%'        THEN 1 ELSE 0 END) as skipped,
+      COUNT(*)                                                       as total
+    FROM vote_logs
+    WHERE 1=1 ${userFilter}
+  `).get(userParam) || { success: 0, failed: 0, skipped: 0, total: 0 };
+
+  // Per-leader stats (top 10 by total attempts)
+  const leaderStats = db.prepare(`
+    SELECT
+      leader,
+      COUNT(*)                                                    as total,
+      SUM(CASE WHEN status = 'SUCCESS'     THEN 1 ELSE 0 END)    as success,
+      SUM(CASE WHEN status = 'FAILED'      THEN 1 ELSE 0 END)    as failed,
+      SUM(CASE WHEN status LIKE 'SKIPPED%' THEN 1 ELSE 0 END)    as skipped
+    FROM vote_logs
+    WHERE 1=1 ${userFilter}
+    GROUP BY leader
+    ORDER BY total DESC
+    LIMIT 10
+  `).all(userParam);
+
+  // Daily votes — last 7 local calendar days (today + 6 previous)
+  const dailyVotes = db.prepare(`
+    SELECT
+      date(timestamp, @mod) as date,
+      COUNT(*)                                                    as total,
+      SUM(CASE WHEN status = 'SUCCESS'     THEN 1 ELSE 0 END)    as success,
+      SUM(CASE WHEN status = 'FAILED'      THEN 1 ELSE 0 END)    as failed,
+      SUM(CASE WHEN status LIKE 'SKIPPED%' THEN 1 ELSE 0 END)    as skipped
+    FROM vote_logs
+    WHERE date(timestamp, @mod) >= date('now', @mod, '-6 days') ${userFilter}
+    GROUP BY date(timestamp, @mod)
+    ORDER BY date ASC
+  `).all({ mod, ...userParam });
+
+  // Today's successful votes (since local midnight)
+  const todaySuccess = db.prepare(`
+    SELECT COUNT(*) as c FROM vote_logs
+    WHERE status = 'SUCCESS' AND date(timestamp, @mod) = date('now', @mod) ${userFilter}
+  `).get({ mod, ...userParam })?.c ?? 0;
+
+  // This week's successful votes — same 7-day window as the chart
+  const weekSuccess = db.prepare(`
+    SELECT COUNT(*) as c FROM vote_logs
+    WHERE status = 'SUCCESS' AND date(timestamp, @mod) >= date('now', @mod, '-6 days') ${userFilter}
+  `).get({ mod, ...userParam })?.c ?? 0;
+
+  // Active enrolled user count (app-wide)
+  const activeUsers = db.prepare(`
+    SELECT COUNT(DISTINCT username) as c FROM users WHERE status = 'active'
+  `).get()?.c ?? 0;
+
+  // Distinct trail leaders followed across the entire app
+  const followedLeaders = db.prepare(`
+    SELECT COUNT(DISTINCT trail_account) as c FROM user_trails
+    WHERE status = 'active'
+  `).get()?.c ?? 0;
+
+  return { breakdown, leaderStats, dailyVotes, todaySuccess, weekSuccess, activeUsers, followedLeaders };
+}
+
 // ── System state ──────────────────────────────────────────────────────────────
+
+// ── Auto-redeem ──────────────────────────────────────────────────────────────────────────────────
+
+export function getAutoRedeem(username) {
+  const u = username.toLowerCase();
+  return db.prepare(`SELECT username, enabled, interval_hours, last_run FROM auto_redeem WHERE username = ?`).get(u)
+    || { username: u, enabled: 0, interval_hours: 24, last_run: null };
+}
+
+export function saveAutoRedeem({ username, enabled, intervalHours }) {
+  const u = username.toLowerCase();
+  db.prepare(`
+    INSERT INTO auto_redeem (username, enabled, interval_hours) VALUES (?, ?, ?)
+    ON CONFLICT(username) DO UPDATE SET enabled = excluded.enabled, interval_hours = excluded.interval_hours, updated_at = CURRENT_TIMESTAMP
+  `).run(u, enabled ? 1 : 0, intervalHours);
+  return getAutoRedeem(u);
+}
+
+export function markRedeemRun(username) {
+  db.prepare(`
+    INSERT INTO auto_redeem (username, enabled, interval_hours, last_run) VALUES (?, 0, 24, CURRENT_TIMESTAMP)
+    ON CONFLICT(username) DO UPDATE SET last_run = CURRENT_TIMESTAMP
+  `).run(username.toLowerCase());
+}
+
+/** Enabled users whose interval has elapsed (or that never ran). */
+export function getDueRedeemers() {
+  return db.prepare(`
+    SELECT r.username, r.interval_hours FROM auto_redeem r
+    JOIN users u ON u.username = r.username
+    WHERE r.enabled = 1 AND u.status = 'active'
+      AND (r.last_run IS NULL OR r.last_run <= datetime('now', '-' || r.interval_hours || ' hours'))
+  `).all();
+}
+
+export function logRedeem({ username, steem = null, sbd = null, vests = null, status, error = null, source = 'auto' }) {
+  return db.prepare(`
+    INSERT INTO redeem_logs (username, steem, sbd, vests, status, error, source) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(username.toLowerCase(), steem, sbd, vests, status, error, source);
+}
+
+export function getRedeemLogs(username, limit = 20) {
+  return db.prepare(`SELECT * FROM redeem_logs WHERE username = ? ORDER BY timestamp DESC, id DESC LIMIT ?`).all(username.toLowerCase(), limit);
+}
+
+// ── System state ───────────────────────────────────────────────────────────────────────────────────
 
 export function getSystemState(key) {
   return db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(key)?.value ?? null;

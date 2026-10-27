@@ -19,7 +19,12 @@ import {
   UserCheck,
   Edit2,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  LayoutDashboard,
+  Zap,
+  Cog,
+  Server,
+  Gift
 } from 'lucide-react';
 
 const SESSION_STORAGE_KEY = 'steem_curation_session';
@@ -127,7 +132,7 @@ function keychainRevokeAuthority({ username, botAccount, currentPosting, memoKey
 
 /** Broadcast account_update using Active key with automatic Steem RPC node failover */
 async function broadcastAccountUpdate(activeKey, username, posting, memoKey, jsonMetadata) {
-  const nodes = ['https://api.steemit.com', 'https://api.justyy.com', 'https://api.steem.fans'];
+  const nodes = ['https://api.moecki.online', 'https://api.steemit.com', 'https://api.justyy.com', 'https://api.steem.fans'];
   let lastErr = null;
   for (const nodeUrl of nodes) {
     try {
@@ -865,8 +870,996 @@ function AddTrailModal({ isOpen, onClose, onAddTrail }) {
   );
 }
 
+// ── Dashboard Stats Components ───────────────────────────────────────────────
+
+function StatCard({ icon: Icon, iconBg, iconColor, value, label, sub }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-card-icon" style={{ backgroundColor: iconBg }}>
+        <Icon size={16} color={iconColor} />
+      </div>
+      <div className="stat-card-value">{value}</div>
+      <div>
+        <div className="stat-card-label">{label}</div>
+        {sub && <div className="stat-card-sub">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── Date helpers ── SQLite stores UTC as "YYYY-MM-DD HH:MM:SS" (no 'T', no zone)
+const parseSqlTs = (ts) => (ts ? new Date(String(ts).replace(' ', 'T') + 'Z') : null);
+// Local calendar date as YYYY-MM-DD (toISOString() would give the UTC date)
+const localDateStr = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const formatLogTime = (ts) => {
+  const d = parseSqlTs(ts);
+  if (!d || isNaN(d)) return '—';
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (localDateStr(d) === localDateStr(new Date())) return time;
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  const date = d.toLocaleDateString([], { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+  return `${date}, ${time}`;
+};
+
+function DashboardStats({ logs, status, trails, username }) {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [autoVoteCount, setAutoVoteCount] = useState(0);
+
+  useEffect(() => {
+    // Send our UTC offset and username so stats are user-specific
+    api(`/stats?tz=${-new Date().getTimezoneOffset()}${username ? `&user=${username}` : ''}`)
+      .then(res => { if (res.success) setStats(res); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+    // Fetch auto-vote target count for this user
+    if (username) {
+      api(`/autovote/${username}`)
+        .then(res => { if (res.success) setAutoVoteCount(res.targets?.length ?? 0); })
+        .catch(() => {});
+    }
+  }, [username]);
+
+  // Totals — prefer server stats, fall back to log-derived counts
+  const totalSuccess = stats?.breakdown?.success ?? status?.totalVotes ?? 0;
+  const totalFailed  = stats?.breakdown?.failed  ?? logs.filter(l => l.status === 'FAILED').length;
+  const totalSkipped = stats?.breakdown?.skipped ?? logs.filter(l => l.status?.startsWith('SKIPPED')).length;
+  const totalAll     = stats?.breakdown?.total   ?? (totalSuccess + totalFailed + totalSkipped);
+  const todaySuccess = stats?.todaySuccess ?? 0;
+  const weekSuccess  = stats?.weekSuccess  ?? 0;
+  const activeUsers  = stats?.activeUsers  ?? status?.activeMembers ?? 0;
+  const followedLeaders = stats?.followedLeaders ?? 0;
+  const successRate  = totalAll > 0 ? ((totalSuccess / totalAll) * 100).toFixed(1) : '0.0';
+
+  const leaderStats = stats?.leaderStats ?? [];
+  const maxLeaderTotal = Math.max(...leaderStats.map(l => l.total), 1);
+
+  // Build last 7 days — fill gaps where no votes occurred
+  const dailyRaw = stats?.dailyVotes ?? [];
+  const last7Days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const dateStr = localDateStr(d);
+    const found = dailyRaw.find(v => v.date === dateStr) || { total: 0, success: 0, failed: 0, skipped: 0 };
+    return { ...found, date: dateStr, label: d.toLocaleDateString('en', { weekday: 'short' }) };
+  });
+  const maxDaily = Math.max(...last7Days.map(d => d.total), 1);
+
+  // Overview bar percentages
+  const pctSuccess = totalAll ? (totalSuccess / totalAll) * 100 : 0;
+  const pctSkipped = totalAll ? (totalSkipped / totalAll) * 100 : 0;
+  const pctFailed  = totalAll ? (totalFailed  / totalAll) * 100 : 0;
+
+  if (loading && !stats) {
+    return (
+      <div className="stats-loading">
+        <RefreshCw size={14} className="spin-active" />
+        Loading stats…
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom: '1.5rem' }}>
+
+      {/* ── Stat Cards ── */}
+      <div className="stats-grid">
+        <StatCard
+          icon={Check}
+          iconBg="rgba(16,185,129,0.12)"
+          iconColor="#10b981"
+          value={totalSuccess.toLocaleString()}
+          label="Total Votes Cast"
+          sub={`${weekSuccess.toLocaleString()} this week`}
+        />
+        <StatCard
+          icon={Activity}
+          iconBg="rgba(59,130,246,0.12)"
+          iconColor="#60a5fa"
+          value={todaySuccess.toLocaleString()}
+          label="Today's Votes"
+          sub="since local midnight"
+        />
+        <StatCard
+          icon={UserCheck}
+          iconBg="rgba(139,92,246,0.12)"
+          iconColor="#a78bfa"
+          value={`${successRate}%`}
+          label="Success Rate"
+          sub={`${totalAll.toLocaleString()} total attempts`}
+        />
+        <StatCard
+          icon={Layers}
+          iconBg="rgba(245,158,11,0.12)"
+          iconColor="#fbbf24"
+          value={trails.length}
+          label="Followed Leaders"
+          sub={`${autoVoteCount} auto-vote target${autoVoteCount !== 1 ? 's' : ''}`}
+        />
+      </div>
+
+      {/* ── Two-column: Distribution + 7-Day Trend ── */}
+      <div className="grid-2col" style={{ marginBottom: '1.25rem', gap: '1.25rem' }}>
+
+        {/* Vote Distribution */}
+        <div className="card" style={{ margin: 0 }}>
+          <div className="chart-section-header">
+            <span className="chart-section-title">Vote Distribution</span>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              {totalAll.toLocaleString()} total
+            </span>
+          </div>
+
+          {/* Stacked overview bar */}
+          <div className="overview-stacked-bar">
+            <div className="overview-stacked-seg" style={{ width: `${pctSuccess}%`, backgroundColor: '#10b981' }} />
+            <div className="overview-stacked-seg" style={{ width: `${pctSkipped}%`, backgroundColor: '#3f3f46' }} />
+            <div className="overview-stacked-seg" style={{ width: `${pctFailed}%`,  backgroundColor: '#ef4444' }} />
+          </div>
+
+          {/* Individual rows */}
+          {[
+            { key: 'voted',   label: 'Voted',   count: totalSuccess, pct: pctSuccess, color: '#10b981' },
+            { key: 'skipped', label: 'Skipped', count: totalSkipped, pct: pctSkipped, color: '#52525b' },
+            { key: 'failed',  label: 'Failed',  count: totalFailed,  pct: pctFailed,  color: '#ef4444' },
+          ].map(({ key, label, count, pct, color }) => (
+            <div key={key} className="bar-row">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', width: '72px', flexShrink: 0 }}>
+                <div style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: color, flexShrink: 0 }} />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{label}</span>
+              </div>
+              <div className="bar-track">
+                <div className="bar-fill" style={{ width: `${pct}%`, backgroundColor: color }} />
+              </div>
+              <div className="bar-count">{count.toLocaleString()}</div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', minWidth: '38px', textAlign: 'right' }}>
+                {pct.toFixed(1)}%
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* 7-Day Daily Trend */}
+        <div className="card" style={{ margin: 0 }}>
+          <div className="chart-section-header">
+            <span className="chart-section-title">7-Day Vote Trend</span>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>last 7 days</span>
+          </div>
+          <div className="daily-chart-container">
+            <div className="daily-chart-bars">
+              {last7Days.map(day => {
+                const heightPx = maxDaily > 0 ? Math.max((day.total / maxDaily) * 64, day.total > 0 ? 4 : 0) : 0;
+                const isToday  = day.date === localDateStr(new Date());
+                return (
+                  <div key={day.date} className="daily-col">
+                    <div className="daily-col-count">{day.total > 0 ? day.total : ''}</div>
+                    <div
+                      className="daily-col-bar"
+                      style={{
+                        height: `${heightPx}px`,
+                        backgroundColor: day.total > 0
+                          ? (isToday ? '#60a5fa' : '#10b981')
+                          : 'var(--bg-card-subtle)',
+                        opacity: day.total > 0 ? 1 : 0.4,
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="daily-chart-labels">
+              {last7Days.map(day => (
+                <div key={day.date} className="daily-col-label">{day.label}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Per-Leader Performance ── */}
+      {leaderStats.length > 0 && (
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div className="chart-section-header">
+            <span className="chart-section-title">Curation Leader Performance</span>
+            <div className="chart-legend">
+              {[
+                { color: '#10b981', label: 'Voted' },
+                { color: '#3f3f46', label: 'Skipped' },
+                { color: '#ef4444', label: 'Failed' },
+              ].map(({ color, label }) => (
+                <div key={label} className="chart-legend-item">
+                  <div className="chart-legend-dot" style={{ backgroundColor: color }} />
+                  {label}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {leaderStats.map(leader => {
+            const pS = leader.total ? (leader.success / leader.total) * 100 : 0;
+            const pK = leader.total ? (leader.skipped / leader.total) * 100 : 0;
+            const pF = leader.total ? (leader.failed  / leader.total) * 100 : 0;
+            const barW = leader.total ? (leader.total / maxLeaderTotal) * 100 : 0;
+
+            return (
+              <div key={leader.leader} className="bar-row" style={{ marginBottom: '0.85rem', alignItems: 'center' }}>
+                <div className="bar-label">
+                  <span style={{ color: 'var(--text-muted)', marginRight: '0.15rem' }}>@</span>
+                  {leader.leader}
+                </div>
+                <div className="bar-track" style={{ height: '10px' }}>
+                  <div className="bar-stacked" style={{ width: `${barW}%` }}>
+                    <div className="bar-stacked-seg" style={{ width: `${pS}%`, backgroundColor: '#10b981' }} />
+                    <div className="bar-stacked-seg" style={{ width: `${pK}%`, backgroundColor: '#3f3f46' }} />
+                    <div className="bar-stacked-seg" style={{ width: `${pF}%`, backgroundColor: '#ef4444' }} />
+                  </div>
+                </div>
+                <div className="bar-count">{leader.total.toLocaleString()}</div>
+                <div style={{ fontSize: '0.72rem', color: '#10b981', minWidth: '38px', textAlign: 'right', fontWeight: '600' }}>
+                  {pS.toFixed(0)}%
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Navigation Bar ──────────────────────────────────────────────────────────
+const NAV_TABS = [
+  { id: 'dashboard',       label: 'Dashboard',       icon: LayoutDashboard },
+  { id: 'curation-trial',  label: 'Curation Trial',  icon: Layers },
+  { id: 'auto-vote',       label: 'Auto Vote',       icon: Zap },
+  { id: 'settings',        label: 'Settings',        icon: Cog },
+];
+
+function Navbar({ activePage, onNavigate, user, botAccount, status, onLogout }) {
+  return (
+    <nav className="navbar">
+      <div className="navbar-inner">
+        {/* Brand */}
+        <div className="navbar-brand">Steem Curation Trial</div>
+
+        {/* Tabs */}
+        <div className="navbar-tabs">
+          {NAV_TABS.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className={`nav-tab ${activePage === id ? 'active' : ''}`}
+              onClick={() => onNavigate(id)}
+            >
+              <Icon size={15} />
+              <span className="nav-tab-label">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* User + Sign Out */}
+        <div className="navbar-user">
+          <span className="badge badge-neutral" style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem' }}>
+            @{user.username}
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onLogout}
+            title="Sign Out"
+          >
+            <LogOut size={13} />
+            <span className="hide-mobile">Sign Out</span>
+          </button>
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+// ── Settings page: Auto Redeem + RPC Nodes ───────────────────────────────────
+const REDEEM_INTERVAL_OPTIONS = [
+  { h: 6, label: 'Every 6 hours' }, { h: 12, label: 'Every 12 hours' }, { h: 24, label: 'Daily' },
+  { h: 48, label: 'Every 2 days' }, { h: 72, label: 'Every 3 days' }, { h: 168, label: 'Weekly' },
+];
+const sqlTimeAgo = (ts) => {
+  if (!ts) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - new Date(ts.replace(' ', 'T') + 'Z').getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+};
+const vestsToSp = (vests, ratio) => {
+  if (!vests) return '0.000 SP';
+  const v = parseFloat(vests);
+  if (!v || isNaN(v) || v <= 0) return '0.000 SP';
+  const r = (typeof ratio === 'number' && ratio > 0) ? ratio : (201780397 / 325261996680);
+  return `${(v * r).toFixed(3)} SP`;
+};
+const hasRewards = (p) => p && [p.steem, p.sbd, p.vests, p.sp].some(v => parseFloat(v) > 0);
+
+function AutoRedeemCard({ username }) {
+  const [settings, setSettings] = useState({ enabled: 0, interval_hours: 24, last_run: null });
+  const [logs, setLogs]         = useState([]);
+  const [pending, setPending]   = useState(null);
+  const [busy, setBusy]         = useState(false);
+  const [msg, setMsg]           = useState({ type: '', text: '' });
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api(`/settings/redeem/${username}`);
+      if (res.success) { setSettings(res.settings); setLogs(res.logs); setPending(res.pending); }
+    } catch { /* ignore */ }
+  }, [username]);
+  useEffect(() => { load(); }, [load]);
+
+  const flash = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg({ type: '', text: '' }), 4000); };
+
+  const save = async (patch) => {
+    const next = { enabled: !!settings.enabled, intervalHours: settings.interval_hours, ...patch };
+    const res = await post('/settings/redeem/save', { username, ...next });
+    if (res.success) { setSettings(res.settings); flash('info', res.message); }
+    else flash('error', res.error || 'Failed to save.');
+  };
+
+  const claim = async () => {
+    setBusy(true);
+    try {
+      const res = await post('/settings/redeem/claim', { username });
+      if (res.logs) { setLogs(res.logs); setSettings(res.settings); }
+      if (res.success) {
+        flash('info', res.status === 'CLAIMED' ? 'Rewards claimed!' : 'No pending rewards to claim.');
+        load();
+      } else flash('error', res.error || 'Claim failed.');
+    } catch { flash('error', 'Claim failed.'); }
+    finally { setBusy(false); }
+  };
+
+  const enabled = !!settings.enabled;
+  const statusBadge = (s) => s === 'CLAIMED' ? 'badge-success' : s === 'FAILED' ? 'badge-danger' : 'badge-neutral';
+
+  return (
+    <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="flex-header">
+        <div>
+          <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Gift size={18} /> Auto Redeem</h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '0.35rem 0 0' }}>
+            Automatically claim your pending STEEM, SBD and Steem Power rewards using the bot's posting authority.
+          </p>
+        </div>
+        <span className={`badge ${enabled ? 'badge-success' : 'badge-neutral'}`}>{enabled ? 'Enabled' : 'Disabled'}</span>
+      </div>
+
+      {msg.text && <div className={`alert-box ${msg.type === 'error' ? 'alert-error' : 'alert-info'}`} style={{ marginTop: '1rem' }}>{msg.text}</div>}
+
+      <div className="trail-item" style={{ display: 'block', marginTop: '1rem' }}>
+        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Pending rewards</div>
+        <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', fontWeight: 600 }}>
+          {pending ? (<>
+            <span title="Liquid STEEM">{pending.steem || '0.000 STEEM'}</span>
+            <span title="Steem Dollars">{pending.sbd || '0.000 SBD'}</span>
+            <span title={pending.vests ? `${pending.vests} (${pending.sp || vestsToSp(pending.vests)})` : 'Steem Power'}>
+              {pending.sp || vestsToSp(pending.vests)}
+            </span>
+          </>) : <span style={{ color: 'var(--text-secondary)' }}>Unavailable</span>}
+        </div>
+      </div>
+
+      <div className="grid-2col" style={{ marginTop: '1rem' }}>
+        <div className="form-group">
+          <label className="form-label" htmlFor="redeem-interval">Claim frequency</label>
+          <select id="redeem-interval" className="form-input" value={settings.interval_hours}
+            onChange={e => save({ intervalHours: parseInt(e.target.value, 10) })}>
+            {REDEEM_INTERVAL_OPTIONS.map(o => <option key={o.h} value={o.h}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Last run</label>
+          <div className="form-input" style={{ display: 'flex', alignItems: 'center' }}>{sqlTimeAgo(settings.last_run)}</div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+        <button className={`btn btn-sm ${enabled ? 'btn-secondary' : 'btn-primary'}`} onClick={() => save({ enabled: !enabled })}>
+          {enabled ? <><Pause size={14} /> Disable Auto Redeem</> : <><Play size={14} /> Enable Auto Redeem</>}
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={claim} disabled={busy || !hasRewards(pending)}>
+          <Gift size={14} /> {busy ? 'Claiming...' : 'Claim Now'}
+        </button>
+      </div>
+
+      {logs.length > 0 && (
+        <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Recent claims</div>
+          {logs.slice(0, 8).map(l => (
+            <div key={l.id} className="trail-item" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '0.85rem' }}>
+                  {l.status === 'CLAIMED' ? `${l.steem || '0.000 STEEM'} · ${l.sbd || '0.000 SBD'} · ${l.sp || vestsToSp(l.vests)}`
+                    : l.status === 'FAILED' ? (l.error || 'Failed') : 'Nothing to claim'}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{sqlTimeAgo(l.timestamp)} · {l.source}</div>
+              </div>
+              <span className={`badge ${statusBadge(l.status)}`}>{l.status.replace(/_/g, ' ')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NodesCard() {
+  const [info, setInfo] = useState(null);
+
+  useEffect(() => {
+    api('/settings/nodes').then(res => { if (res.success) setInfo(res); }).catch(() => {});
+  }, []);
+
+  return (
+    <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="flex-header">
+        <div>
+          <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Server size={18} /> Connections</h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '0.35rem 0 0' }}>
+            Steem blockchain network nodes and real-time streaming connections in use.
+          </p>
+        </div>
+      </div>
+
+      {/* Steem WebSocket Bridge */}
+      {info?.bridge?.url && (
+        <div className="trail-item" style={{ display: 'block', marginTop: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Steem WebSocket Bridge (Block Stream)</div>
+            <span className={`badge ${info.bridge.live ? 'badge-success' : 'badge-warning'}`}>
+              {info.bridge.live ? 'Live Streaming' : 'Fallback to RPC'}
+            </span>
+          </div>
+          <div style={{ fontWeight: 600, wordBreak: 'break-all', marginTop: '0.3rem' }}>{info.bridge.url}</div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.3rem' }}>
+            {info.bridge.live
+              ? 'Receiving new blocks in real-time with zero polling latency.'
+              : 'Bridge offline or idle — streaming automatically through Steem RPC nodes.'}
+          </div>
+        </div>
+      )}
+
+      {/* Steem RPC Node */}
+      {info && (
+        <div className="trail-item" style={{ display: 'block', marginTop: '0.75rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Steem RPC Node (Transactions & Queries)</div>
+            <span className="badge badge-success">Active</span>
+          </div>
+          <div style={{ fontWeight: 600, wordBreak: 'break-all', marginTop: '0.3rem' }}>{info.active}</div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.3rem' }}>
+            {info.autoFailover
+              ? 'Used for broadcasting votes, claims & queries. Automated node failover is enabled.'
+              : 'Used for broadcasting votes, claims & queries. Pinned to this node.'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountStatusCard({
+  user,
+  steemProfile,
+  vp,
+  isAccountActive,
+  hasBotAuth,
+  onToggleStatus,
+  onManageAuthority,
+}) {
+  return (
+    <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="flex-header" style={{ marginBottom: '0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+          <img
+            src={`https://steemitimages.com/u/${user.username}/avatar`}
+            onError={(e) => { e.target.src = 'https://steemitimages.com/u/steemit/avatar'; }}
+            alt={user.username}
+            style={{ width: '44px', height: '44px', borderRadius: '50%', border: '1px solid var(--border-subtle)' }}
+          />
+          <div>
+            <div style={{ fontWeight: '700', fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span>@{user.username}</span>
+              <span className={`badge ${isAccountActive ? 'badge-success' : 'badge-warning'}`}>
+                {isAccountActive ? 'Account Active' : 'Account Paused'}
+              </span>
+              {hasBotAuth ? (
+                <span className="badge badge-success hide-mobile">Authority Granted</span>
+              ) : (
+                <span className="badge badge-danger hide-mobile">No Authority</span>
+              )}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              Reputation {steemProfile?.reputation ?? 25} · Auth Mode: Posting Authority
+            </div>
+          </div>
+        </div>
+
+        <div className="header-actions" style={{ gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onToggleStatus}
+          >
+            {isAccountActive ? <><Pause size={13} /> Pause All</> : <><Play size={13} /> Resume All</>}
+          </button>
+          {hasBotAuth ? (
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              onClick={() => onManageAuthority('revoke')}
+            >
+              Revoke Authority
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => onManageAuthority('grant')}
+            >
+              <Shield size={13} /> Grant Authority
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{ marginTop: '1.25rem' }}>
+        <VotingPowerMeter vp={vp} />
+      </div>
+    </div>
+  );
+}
+
+function SettingsPage({
+  user,
+  steemProfile,
+  vp,
+  isAccountActive,
+  hasBotAuth,
+  onToggleStatus,
+  onManageAuthority
+}) {
+  return (
+    <>
+      <AccountStatusCard
+        user={user}
+        steemProfile={steemProfile}
+        vp={vp}
+        isAccountActive={isAccountActive}
+        hasBotAuth={hasBotAuth}
+        onToggleStatus={onToggleStatus}
+        onManageAuthority={onManageAuthority}
+      />
+      <AutoRedeemCard username={user.username} />
+      <NodesCard />
+    </>
+  );
+}
+
+// ── Placeholder page wrapper ─────────────────────────────────────────────────
+const DELAY_OPTIONS = [0, 1, 2, 3, 5, 10, 15, 20, 30, 45, 60];
+const fmtDelay = (m) => (m === 0 ? 'Immediately' : `${m} min`);
+const avatarOf = (name) => `https://steemitimages.com/u/${name}/avatar`;
+const fallbackAvatar = (e) => { e.target.src = 'https://steemitimages.com/u/steemit/avatar'; };
+
+function AutoVotePage({ username }) {
+  const [targets, setTargets]   = useState([]);
+  const [logs, setLogs]         = useState([]);
+  const [perAuthor, setPerAuthor] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState('');
+  const [notice, setNotice]     = useState('');
+
+  const [showAdd, setShowAdd]   = useState(false);
+  const [author, setAuthor]     = useState('');
+  const [weight, setWeight]     = useState(100);
+  const [delay, setDelay]       = useState(0);
+  const [minVp, setMinVp]       = useState(80);
+  const [maxDaily, setMaxDaily] = useState(0);
+  const [adding, setAdding]     = useState(false);
+
+  // Real-time account verification state (mirrors AddTrailModal)
+  const [avChecking, setAvChecking] = useState(false);
+  const [avVerified, setAvVerified] = useState(null);
+  const [avVerifyErr, setAvVerifyErr] = useState('');
+
+  const [editId, setEditId]     = useState(null);
+  const [eWeight, setEWeight]   = useState(100);
+  const [eDelay, setEDelay]     = useState(0);
+  const [eMinVp, setEMinVp]     = useState(80);
+  const [eMaxDaily, setEMaxDaily] = useState(0);
+
+  const [deleting, setDeleting] = useState(null);
+
+  // Debounced Steem account lookup for the author field
+  useEffect(() => {
+    const clean = author.trim().toLowerCase();
+    if (!clean || clean.length < 3) {
+      setAvVerified(null);
+      setAvVerifyErr('');
+      return;
+    }
+    setAvChecking(true);
+    setAvVerifyErr('');
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api(`/verify/${clean}`);
+        if (res.success && res.profile) {
+          setAvVerified(res.profile);
+          setAvVerifyErr('');
+        } else {
+          setAvVerified(null);
+          setAvVerifyErr(`Account @${clean} does not exist on Steem blockchain.`);
+        }
+      } catch (e) {
+        setAvVerified(null);
+        setAvVerifyErr('Failed to verify account on Steem.');
+      } finally {
+        setAvChecking(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [author]);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api(`/autovote/${username}`);
+      if (res.success) {
+        setTargets(res.targets || []);
+        setLogs(res.logs || []);
+        setPerAuthor(res.perAuthor || []);
+      } else if (res.error) setError(res.error);
+    } catch { setError('Failed to load auto-vote targets.'); }
+    finally { setLoading(false); }
+  }, [username]);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const flash = (msg) => { setNotice(msg); setTimeout(() => setNotice(''), 3500); };
+
+  const handleAdd = async (e) => {
+    e.preventDefault();
+    if (!avVerified) {
+      setAvVerifyErr('Please enter a valid Steem account name.');
+      return;
+    }
+    setAdding(true); setError('');
+    try {
+      const res = await post('/autovote/add', {
+        username, targetAuthor: avVerified.name,
+        weight: parseInt(weight, 10), delay: parseInt(delay, 10),
+        minVp: parseInt(minVp, 10), maxDailyVotes: parseInt(maxDaily, 10) || 0,
+      });
+      if (!res.success) throw new Error(res.error || 'Failed to add author.');
+      setTargets(res.targets); setLogs(res.logs || logs); setPerAuthor(res.perAuthor || perAuthor);
+      setAuthor(''); setAvVerified(null); setShowAdd(false); flash(res.message);
+    } catch (err) { setError(err.message); }
+    finally { setAdding(false); }
+  };
+
+  const mutate = async (path, body, okMsg) => {
+    setError('');
+    try {
+      const res = await post(path, { username, ...body });
+      if (!res.success) throw new Error(res.error || 'Request failed.');
+      setTargets(res.targets);
+      if (okMsg) flash(okMsg);
+      return true;
+    } catch (err) { setError(err.message); return false; }
+  };
+
+  const startEdit = (t) => {
+    setEditId(t.id); setEWeight(t.weight); setEDelay(t.delay);
+    setEMinVp(t.min_vp); setEMaxDaily(t.max_daily_votes);
+  };
+
+  const saveEdit = async (id) => {
+    const ok = await mutate('/autovote/update', {
+      id, weight: parseInt(eWeight, 10), delay: parseInt(eDelay, 10),
+      minVp: parseInt(eMinVp, 10), maxDailyVotes: parseInt(eMaxDaily, 10) || 0,
+    }, 'Target updated');
+    if (ok) setEditId(null);
+  };
+
+  const statsFor = (a) => perAuthor.find(p => p.author === a) || { total: 0, success: 0 };
+  const timeAgo = (ts) => {
+    const d = new Date(ts.replace(' ', 'T') + 'Z');
+    const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  };
+  const badgeFor = (s) => s === 'SUCCESS' ? 'badge-success' : s === 'FAILED' ? 'badge-danger' : 'badge-warning';
+
+  return (
+    <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="flex-header">
+        <div>
+          <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Zap size={18} /> Auto Vote Targets ({targets.length})
+          </h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '0.35rem 0 0' }}>
+            Vote on any author's new posts automatically, as soon as they publish.
+          </p>
+        </div>
+        <div className="header-actions">
+          <button className="btn btn-primary btn-sm" onClick={() => { setShowAdd(v => !v); if (showAdd) { setAuthor(''); setAvVerified(null); setAvVerifyErr(''); } }}>
+            {showAdd ? <X size={14} /> : <Plus size={14} />} {showAdd ? 'Cancel' : 'Add Author'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="alert-box alert-error" style={{ marginTop: '1rem' }}>{error}</div>}
+      {notice && <div className="alert-box alert-info" style={{ marginTop: '1rem' }}>{notice}</div>}
+
+      {showAdd && (
+        <form onSubmit={handleAdd} className="trail-item" style={{ marginTop: '1rem', display: 'block' }}>
+          <div className="form-group">
+            <label className="form-label" htmlFor="av-author">
+              <span>Author to auto-vote</span>
+              {avChecking && <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Verifying on Steem...</span>}
+            </label>
+            <input id="av-author" className="form-input" placeholder="e.g. dhaka.witness"
+              value={author} onChange={e => setAuthor(e.target.value)}
+              autoComplete="off" spellCheck="false" required />
+          </div>
+
+          {/* Account Verification Feedback Card */}
+          {avVerified && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '0.75rem 1rem',
+              backgroundColor: 'var(--bg-input)',
+              border: '1px solid rgba(34, 197, 94, 0.3)',
+              borderRadius: 'var(--radius-sm)',
+              marginBottom: '1rem'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <img
+                  src={`https://steemitimages.com/u/${avVerified.name}/avatar`}
+                  onError={(e) => { e.target.src = 'https://steemitimages.com/u/steemit/avatar'; }}
+                  alt={avVerified.name}
+                  style={{ width: '32px', height: '32px', borderRadius: '50%' }}
+                />
+                <div>
+                  <div style={{ fontWeight: '600', fontSize: '0.9rem' }}>@{avVerified.name}</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                    Reputation {avVerified.reputation} · {avVerified.votingPower}% VP
+                  </div>
+                </div>
+              </div>
+              <span className="badge badge-success">Verified</span>
+            </div>
+          )}
+
+          {avVerifyErr && (
+            <div className="alert-box alert-error" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+              <AlertCircle size={14} />
+              <span>{avVerifyErr}</span>
+            </div>
+          )}
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="av-weight">
+              <span>Vote Weight</span><span>{weight}%</span>
+            </label>
+            <input id="av-weight" type="range" min="1" max="100" value={weight}
+              onChange={e => setWeight(e.target.value)} style={{ width: '100%' }} />
+          </div>
+          <div className="grid-2col">
+            <div className="form-group">
+              <label className="form-label" htmlFor="av-delay">Vote Delay</label>
+              <select id="av-delay" className="form-input" value={delay} onChange={e => setDelay(e.target.value)}>
+                {DELAY_OPTIONS.map(m => <option key={m} value={m}>{fmtDelay(m)}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="av-minvp">Min Voting Power (%)</label>
+              <input id="av-minvp" type="number" min="10" max="99" className="form-input"
+                value={minVp} onChange={e => setMinVp(e.target.value)} />
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="av-max">Max votes per day (0 = unlimited)</label>
+            <input id="av-max" type="number" min="0" className="form-input"
+              value={maxDaily} onChange={e => setMaxDaily(e.target.value)} />
+          </div>
+          <button type="submit" className="btn btn-primary btn-full" disabled={adding || !avVerified}>
+            {adding ? 'Verifying & adding...' : 'Start Auto Voting'}
+          </button>
+        </form>
+      )}
+
+      <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        {loading ? (
+          <p style={{ color: 'var(--text-secondary)' }}>Loading...</p>
+        ) : targets.length === 0 ? (
+          <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '1.5rem 0' }}>
+            No targeted authors yet. Add an author to vote on their new posts automatically.
+          </p>
+        ) : targets.map(t => {
+          const st = statsFor(t.target_author);
+          const active = t.status === 'active';
+          return (
+            <div key={t.id} className="trail-item" style={{ display: 'block' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <img src={avatarOf(t.target_author)} onError={fallbackAvatar} alt={t.target_author}
+                    style={{ width: 36, height: 36, borderRadius: '50%' }} />
+                  <div>
+                    <a href={`https://steemit.com/@${t.target_author}`} target="_blank" rel="noreferrer"
+                      style={{ color: 'var(--text-primary)', fontWeight: 600, textDecoration: 'none' }}>
+                      @{t.target_author} <ExternalLink size={11} />
+                    </a>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      {t.weight}% weight · {fmtDelay(t.delay)} · min VP {t.min_vp}%
+                      {t.max_daily_votes > 0 ? ` · max ${t.max_daily_votes}/day` : ''}
+                      {' · '}{st.success} voted
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span className={`badge ${active ? 'badge-success' : 'badge-neutral'}`}>{active ? 'Active' : 'Paused'}</span>
+                  <button className="btn btn-secondary btn-sm" title={active ? 'Pause' : 'Resume'}
+                    onClick={() => mutate('/autovote/update', { id: t.id, status: active ? 'paused' : 'active' })}>
+                    {active ? <Pause size={14} /> : <Play size={14} />}
+                  </button>
+                  <button className="btn btn-secondary btn-sm" title="Edit"
+                    onClick={() => editId === t.id ? setEditId(null) : startEdit(t)}><Sliders size={14} /></button>
+                  <button className="btn btn-danger btn-sm" title="Remove" onClick={() => setDeleting(t)}><Trash2 size={14} /></button>
+                </div>
+              </div>
+
+              {editId === t.id && (
+                <div style={{ marginTop: '1rem' }}>
+                  <div className="form-group">
+                    <label className="form-label"><span>Vote Weight</span><span>{eWeight}%</span></label>
+                    <input type="range" min="1" max="100" value={eWeight}
+                      onChange={e => setEWeight(e.target.value)} style={{ width: '100%' }} />
+                  </div>
+                  <div className="grid-2col">
+                    <div className="form-group">
+                      <label className="form-label">Vote Delay</label>
+                      <select className="form-input" value={eDelay} onChange={e => setEDelay(e.target.value)}>
+                        {DELAY_OPTIONS.map(m => <option key={m} value={m}>{fmtDelay(m)}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Min VP (%)</label>
+                      <input type="number" min="10" max="99" className="form-input"
+                        value={eMinVp} onChange={e => setEMinVp(e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Max votes per day (0 = unlimited)</label>
+                    <input type="number" min="0" className="form-input"
+                      value={eMaxDaily} onChange={e => setEMaxDaily(e.target.value)} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button className="btn btn-primary btn-sm" onClick={() => saveEdit(t.id)}><Check size={14} /> Save</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => setEditId(null)}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <h3 style={{ margin: '1.75rem 0 0.75rem', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <Activity size={16} /> Recent Auto Votes
+      </h3>
+      {logs.length === 0 ? (
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+          No auto-votes yet. They appear here when a targeted author publishes a new post.
+        </p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {logs.map(l => (
+            <div key={l.id} className="trail-item" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <a href={`https://steemit.com/@${l.author}/${l.permlink}`} target="_blank" rel="noreferrer"
+                  style={{ color: 'var(--text-primary)', textDecoration: 'none', fontWeight: 500 }}>
+                  @{l.author}/{l.permlink.length > 32 ? l.permlink.slice(0, 32) + '…' : l.permlink}
+                </a>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                  {l.weight}% · {timeAgo(l.timestamp)}{l.error ? ` · ${l.error}` : ''}
+                </div>
+              </div>
+              <span className={`badge ${badgeFor(l.status)}`}>{l.status.replace('SKIPPED_', 'SKIPPED ')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <ConfirmModal
+        isOpen={!!deleting}
+        title="Remove Target Author"
+        message={deleting ? `Stop auto-voting @${deleting.target_author}'s new posts?` : ''}
+        confirmText="Remove"
+        isProcessing={false}
+        onCancel={() => setDeleting(null)}
+        onConfirm={async () => {
+          await mutate('/autovote/remove', { id: deleting.id }, 'Target removed');
+          setDeleting(null);
+        }}
+      />
+    </div>
+  );
+}
+
+function ComingSoonPage({ icon: Icon, title, description }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: '40vh',
+      gap: '1rem',
+      color: 'var(--text-secondary)',
+      textAlign: 'center',
+      padding: '3rem 1rem',
+    }}>
+      <div style={{
+        width: '56px',
+        height: '56px',
+        borderRadius: '14px',
+        backgroundColor: 'var(--bg-card)',
+        border: '1px solid var(--border-subtle)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        <Icon size={26} color="var(--text-secondary)" />
+      </div>
+      <div>
+        <div style={{ fontSize: '1.1rem', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '0.4rem' }}>{title}</div>
+        <div style={{ fontSize: '0.875rem', maxWidth: '360px', lineHeight: '1.6' }}>{description}</div>
+      </div>
+      <span className="badge badge-neutral" style={{ marginTop: '0.5rem' }}>Coming Soon</span>
+    </div>
+  );
+}
+
 // ── Dashboard View ──────────────────────────────────────────────────────────
-function DashboardView({ user, steemProfile, trails = [], logs = [], status, botAccount, onRefresh, onLogout }) {
+function DashboardView({ user, steemProfile, trails = [], logs = [], status, wsState, botAccount, onRefresh, onLogout }) {
+  const [activePage, setActivePage] = useState('dashboard');
   const [actionError, setActionError] = useState('');
   const [actionSuccess, setActionSuccess] = useState('');
 
@@ -1192,125 +2185,37 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
 
   return (
     <div className="container-app">
-      {/* Top Header */}
-      <div className="flex-header" style={{ marginBottom: '2rem', paddingBottom: '1rem', borderBottom: '1px solid var(--border-subtle)' }}>
-        <div>
-          <h1 style={{ fontSize: '1.25rem', fontWeight: '700', margin: 0 }}>
-            Steem Curation Trial
-          </h1>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
-            Block #{status?.syncedBlock?.toLocaleString() ?? '...'} · Bot: @{botAccount}
-          </p>
-        </div>
+      {/* Navigation Bar */}
+      <Navbar
+        activePage={activePage}
+        onNavigate={setActivePage}
+        user={user}
+        botAccount={botAccount}
+        status={status}
+        onLogout={onLogout}
+      />
 
-        <div className="header-actions" style={{ alignItems: 'center', gap: '0.75rem' }}>
-          <span className="badge badge-neutral" style={{ padding: '0.35rem 0.65rem' }}>
-            @{user.username}
-          </span>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={onLogout}
-            title="Sign Out"
-          >
-            <LogOut size={14} />
-            <span className="hide-mobile">Sign Out</span>
-          </button>
-        </div>
+      {/* Block sync info strip */}
+      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: '1.25rem', marginTop: '-0.5rem' }}>
+        Block #{status?.syncedBlock?.toLocaleString() ?? '…'} · Bot: @{botAccount}
       </div>
 
       {actionError && (
-        <div className="alert-box alert-error" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <div className="alert-box alert-error" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
           <AlertCircle size={16} />
           <span>{actionError}</span>
         </div>
       )}
 
       {actionSuccess && (
-        <div className="alert-box alert-info" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--color-success)' }}>
+        <div className="alert-box alert-info" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--color-success)', marginBottom: '1rem' }}>
           <Check size={16} />
           <span>{actionSuccess}</span>
         </div>
       )}
 
-      {/* Authority Warning Banner */}
-      {!hasBotAuth && (
-        <div className="alert-box alert-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <AlertCircle size={16} />
-            <div>
-              <div style={{ fontWeight: '600' }}>Posting Authority Not Granted</div>
-              <div style={{ fontSize: '0.8rem', opacity: 0.85, marginTop: '0.15rem' }}>
-                @{botAccount} does not have posting authority on @{user.username}. Trail voting cannot function without it.
-              </div>
-            </div>
-          </div>
-          
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            onClick={() => setShowAuthorityModal('grant')}
-            style={{ flexShrink: 0 }}
-          >
-            <Shield size={13} />
-            <span>Grant Authority</span>
-          </button>
-        </div>
-      )}
-
-      {/* Account Status Card */}
-      <div className="card" style={{ marginBottom: '1.5rem' }}>
-        <div className="flex-header" style={{ marginBottom: '0' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
-            <img
-              src={`https://steemitimages.com/u/${user.username}/avatar`}
-              onError={(e) => { e.target.src = 'https://steemitimages.com/u/steemit/avatar'; }}
-              alt={user.username}
-              style={{ width: '44px', height: '44px', borderRadius: '50%', border: '1px solid var(--border-subtle)' }}
-            />
-            <div>
-              <div style={{ fontWeight: '700', fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span>@{user.username}</span>
-                <span className={`badge ${isAccountActive ? 'badge-success' : 'badge-warning'}`}>
-                  {isAccountActive ? 'Account Active' : 'Account Paused'}
-                </span>
-                {hasBotAuth ? (
-                  <span className="badge badge-success hide-mobile">Authority Granted</span>
-                ) : (
-                  <span className="badge badge-danger hide-mobile">No Authority</span>
-                )}
-              </div>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                Reputation {steemProfile?.reputation ?? 25} · Auth Mode: Posting Authority
-              </div>
-            </div>
-          </div>
-
-          <div className="header-actions" style={{ gap: '0.5rem' }}>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={handleToggleGlobalStatus}
-            >
-              {isAccountActive ? <><Pause size={13} /> Pause All</> : <><Play size={13} /> Resume All</>}
-            </button>
-            {hasBotAuth && (
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={() => setShowAuthorityModal('revoke')}
-              >
-                Revoke Authority
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div style={{ marginTop: '1.25rem' }}>
-          <VotingPowerMeter vp={vp} />
-        </div>
-      </div>
-
+      {/* ── Page: Curation Trial ─────────────────────────────────────── */}
+      {activePage === 'curation-trial' && (<>
 
       {/* Followed Curation Trails Section */}
       <div className="card" style={{ marginBottom: '1.5rem' }}>
@@ -1544,6 +2449,54 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
           </div>
         )}
       </div>
+      </>)}
+
+      {/* ── Page: Auto Vote ──────────────────────────────────────────── */}
+      {activePage === 'auto-vote' && <AutoVotePage username={user.username} />}
+
+      {/* ── Page: Settings ───────────────────────────────────────────── */}
+      {activePage === 'settings' && (
+        <SettingsPage
+          user={user}
+          steemProfile={steemProfile}
+          vp={vp}
+          isAccountActive={isAccountActive}
+          hasBotAuth={hasBotAuth}
+          onToggleStatus={handleToggleGlobalStatus}
+          onManageAuthority={setShowAuthorityModal}
+        />
+      )}
+
+      {/* ── Page: Dashboard ──────────────────────────────────────────── */}
+      {activePage === 'dashboard' && (<>
+
+      {/* Authority Warning Banner */}
+      {!hasBotAuth && (
+        <div className="alert-box alert-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <AlertCircle size={16} />
+            <div>
+              <div style={{ fontWeight: '600' }}>Posting Authority Not Granted</div>
+              <div style={{ fontSize: '0.8rem', opacity: 0.85, marginTop: '0.15rem' }}>
+                @{botAccount} does not have posting authority on @{user.username}. Trail voting cannot function without it.
+              </div>
+            </div>
+          </div>
+          
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowAuthorityModal('grant')}
+            style={{ flexShrink: 0 }}
+          >
+            <Shield size={13} />
+            <span>Grant Authority</span>
+          </button>
+        </div>
+      )}
+
+      {/* ── Dashboard Stats ── */}
+      <DashboardStats logs={logs} status={status} trails={trails} username={user.username} />
 
       {/* Live Vote Activity Logs */}
       <div className="card">
@@ -1609,8 +2562,8 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
                       <td>
                         <VoteStatusBadge status={log.status} error={log.error} />
                       </td>
-                      <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                        {new Date(log.timestamp + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title={parseSqlTs(log.timestamp)?.toLocaleString()}>
+                        {formatLogTime(log.timestamp)}
                       </td>
                     </tr>
                   ))}
@@ -1662,6 +2615,8 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
         )}
       </div>
 
+      </>)} {/* end activePage === 'dashboard' */}
+
       {/* Add Trail Modal */}
       <AddTrailModal
         isOpen={showAddModal}
@@ -1692,6 +2647,7 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, bot
         onConfirmActiveKey={showAuthorityModal === 'grant' ? handleConfirmGrantActiveKey : handleConfirmRevokeActiveKey}
         onCancel={() => setShowAuthorityModal(null)}
       />
+
     </div>
   );
 }
@@ -1722,13 +2678,14 @@ export default function App() {
   // WebSocket ref
   const wsRef = React.useRef(null);
   const reconnectTimerRef = React.useRef(null);
+  const [wsState, setWsState] = useState('connecting'); // connecting | connected | disconnected
 
   // One-time HTTP fetch for initial data load (session restore)
   const loadDataOnce = useCallback(async (targetUsername) => {
     try {
       const [statusRes, logsRes] = await Promise.all([
         api('/status').catch(() => null),
-        api('/logs?limit=50').catch(() => null),
+        api('/logs').catch(() => null),
       ]);
 
       if (statusRes?.success) setStatus(statusRes);
@@ -1776,9 +2733,11 @@ export default function App() {
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    setWsState('connecting');
 
     ws.onopen = () => {
       console.log('[WS] Connected');
+      setWsState('connected');
       // Subscribe to the current user's updates
       const username = currentUserRef.current?.username || localStorage.getItem(SESSION_STORAGE_KEY);
       if (username) {
@@ -1814,6 +2773,7 @@ export default function App() {
 
     ws.onclose = () => {
       console.log('[WS] Disconnected, reconnecting in 3s...');
+      setWsState('disconnected');
       reconnectTimerRef.current = setTimeout(connectWs, 3000);
     };
 
@@ -1888,6 +2848,7 @@ export default function App() {
           trails={trails}
           logs={logs}
           status={status}
+          wsState={wsState}
           botAccount={botAccount}
           onRefresh={() => loadDataOnce(currentUser?.username)}
           onLogout={handleLogout}

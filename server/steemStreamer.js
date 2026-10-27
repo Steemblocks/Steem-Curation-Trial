@@ -5,13 +5,15 @@
  * Dynamically tracks all active curation trail leaders registered by users.
  */
 
-import { getSystemState, setSystemState, getWatchedAccounts } from './db.js';
-import { getGlobals, getBlock }                              from './steemClient.js';
-import { dispatchTrailVotes }                                 from './voteEngine.js';
+import { getSystemState, setSystemState, getWatchedAccounts, getAutoVoteWatchedAuthors } from './db.js';
+import { getGlobals, getBlock, getContent }                  from './steemClient.js';
+import { dispatchTrailVotes, dispatchAutoVotes }              from './voteEngine.js';
+import { isBridgeLive, getBridgeHead, getBridgeBlock, waitForBridgeBlock } from './bridgeClient.js';
 
 let running      = false;
 let currentBlock = 0;
 let watchedSet   = new Set(); // lowercase account names being watched
+let authorSet    = new Set(); // authors targeted for auto-vote
 
 export function getSyncedBlock()  { return currentBlock; }
 export function getWatchedSet()   { return watchedSet;   }
@@ -20,6 +22,7 @@ export function getWatchedSet()   { return watchedSet;   }
 export function refreshWatched() {
   const accounts = getWatchedAccounts();
   watchedSet = new Set(accounts.map(a => a.toLowerCase()));
+  authorSet  = new Set(getAutoVoteWatchedAuthors().map(a => a.toLowerCase()));
   if (watchedSet.size > 0) {
     console.log(`[Streamer] Watching ${watchedSet.size} trail leader(s): ${[...watchedSet].join(', ')}`);
   }
@@ -33,9 +36,12 @@ export async function startStreamer() {
   setInterval(refreshWatched, 25_000); // refresh every 25s
 
   try {
-    const globals = await getGlobals();
-    const head    = globals?.head_block_number ?? 0;
-    const saved   = parseInt(getSystemState('synced_block') ?? '0', 10);
+    let head = getBridgeHead();
+    if (!head) {
+      const globals = await getGlobals();
+      head = globals?.head_block_number ?? 0;
+    }
+    const saved = parseInt(getSystemState('synced_block') ?? '0', 10);
     
     // If saved block is too old (> 50 blocks behind), catch up near head
     if (saved > 0 && head - saved < 50) {
@@ -56,8 +62,12 @@ export async function startStreamer() {
 async function loop() {
   while (running) {
     try {
-      const globals = await getGlobals();
-      const head    = globals?.head_block_number ?? currentBlock;
+      // Determine latest head block: prefer bridge websocket, fallback to getGlobals HTTP
+      let head = getBridgeHead();
+      if (!head) {
+        const globals = await getGlobals();
+        head = globals?.head_block_number ?? currentBlock;
+      }
 
       // Prevent falling too far behind if network stalled
       if (head - currentBlock > 40) {
@@ -70,7 +80,12 @@ async function loop() {
         setSystemState('synced_block', currentBlock);
         currentBlock++;
       } else {
-        await sleep(3000); // wait for next 3-second Steem block
+        // Caught up with head: wait for WebSocket push or fall back to timer
+        if (isBridgeLive()) {
+          await waitForBridgeBlock(3500);
+        } else {
+          await sleep(3000); // wait for next 3-second Steem block
+        }
       }
     } catch (err) {
       console.error(`[Streamer] Error at block #${currentBlock}:`, err.message);
@@ -80,9 +95,16 @@ async function loop() {
 }
 
 async function processBlock(blockNum) {
-  if (watchedSet.size === 0) return;
+  if (watchedSet.size === 0 && authorSet.size === 0) return;
 
-  const block = await getBlock(blockNum);
+  // 1. Try WebSocket bridge cache first (0 network round-trips)
+  let block = getBridgeBlock(blockNum);
+
+  // 2. Fall back to HTTP RPC if not in cache (e.g. historical block catch-up)
+  if (!block) {
+    block = await getBlock(blockNum);
+  }
+
   if (!block || !block.transactions) return;
 
   for (const tx of block.transactions) {
@@ -90,7 +112,17 @@ async function processBlock(blockNum) {
 
     for (const op of tx.operations) {
       const [type, data] = op;
-      if (type !== 'vote' || !data) continue;
+      if (!data) continue;
+
+      // Auto-vote: new top-level post by a targeted author
+      if (type === 'comment') {
+        const postAuthor = (data.author ?? '').toLowerCase();
+        if (data.parent_author !== '' || !authorSet.has(postAuthor)) continue;
+        handleNewPost(postAuthor, data.permlink, blockNum);
+        continue;
+      }
+
+      if (type !== 'vote') continue;
 
       const voter = (data.voter ?? '').toLowerCase();
       if (!watchedSet.has(voter)) continue;
@@ -105,6 +137,19 @@ async function processBlock(blockNum) {
         leaderWeight: leaderWeightPct,
       }).catch(err => console.error('[Streamer] Dispatch error:', err.message));
     }
+  }
+}
+
+/** Comment ops also fire on edits — only vote when created === last_update (a fresh post). */
+async function handleNewPost(author, permlink, blockNum) {
+  try {
+    const post = await getContent(author, permlink);
+    if (!post || !post.created) return;
+    if (post.created !== post.last_update) return; // edited post
+    console.log(`[Streamer] 📝 Block #${blockNum}: new post @${author}/${permlink}`);
+    await dispatchAutoVotes({ author, permlink });
+  } catch (err) {
+    console.error('[Streamer] Auto-vote dispatch error:', err.message);
   }
 }
 

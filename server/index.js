@@ -11,9 +11,17 @@ dotenv.config();
 import {
   initDb, getAllUsers, getUser, upsertUserAccount,
   getUserTrails, addUserTrail, updateUserTrail, deleteUserTrail,
-  updateUserStatus, deleteUser, getVoteLogs, getTotalVoteLogsCount, getVoteStats
+  updateUserStatus, deleteUser, getVoteLogs, getTotalVoteLogsCount, getVoteStats,
+  getDashboardStats, getAutoVoteTargets, addAutoVoteTarget, updateAutoVoteTarget,
+  deleteAutoVoteTarget, getAutoVoteActivity,
+  getAutoRedeem, saveAutoRedeem, getRedeemLogs
 } from './db.js';
-import { getAccount, calcVP, formatRep, hasBotAuthority, verifySignature, BOT_ACCOUNT } from './steemClient.js';
+import {
+  getAccount, calcVP, formatRep, hasBotAuthority, verifySignature, BOT_ACCOUNT,
+  initNodes, getNodeConfig, getCachedGlobals, vestsToSp
+} from './steemClient.js';
+import { startAutoRedeem, redeemNow } from './autoRedeem.js';
+import { startBridge, getBridgeStatus } from './bridgeClient.js';
 import { startStreamer, getSyncedBlock, getWatchedSet, refreshWatched } from './steemStreamer.js';
 import { initWs, broadcast, broadcastAll, getSubscribedUsers } from './wsHub.js';
 import { generateToken, requireAuth, requireSelf } from './auth.js';
@@ -48,6 +56,7 @@ app.use(helmet({
         "'self'",
         "ws:",
         "wss:",
+        "https://api.moecki.online",
         "https://api.steemit.com",
         "https://api.justyy.com",
         "https://api.steem.fans",
@@ -93,8 +102,11 @@ const authLimiter = rateLimit({
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 
 initDb();
+initNodes();
+startBridge();
 initWs(server);
 startStreamer();
+startAutoRedeem();
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 async function buildProfile(username) {
@@ -148,7 +160,7 @@ function broadcastStatusAndLogs() {
       activeMembers: stats.activeMembers,
       totalVotes: stats.totalVotes,
     });
-    broadcastAll('logs', getVoteLogs(50));
+    broadcastAll('logs', getVoteLogs(10000));
 
     // Push live user profile updates (for Voting Power) to currently subscribed clients
     const activeUsers = getSubscribedUsers();
@@ -178,11 +190,23 @@ app.get('/api/status', async (req, res) => {
   } catch (e) { safeError(res, e, 'Status'); }
 });
 
+// Stats (aggregated data for dashboard charts)
+app.get('/api/stats', (req, res) => {
+  try {
+    // ?tz = minutes east of UTC (e.g. 360 for UTC+6); validated/clamped in getDashboardStats
+    // ?user = username to scope stats to a specific user
+    const tz = parseInt(req.query.tz, 10);
+    const username = req.query.user ? req.query.user.trim().toLowerCase() : null;
+    const data = getDashboardStats(Number.isNaN(tz) ? 0 : tz, username);
+    res.json({ success: true, ...data });
+  } catch (e) { safeError(res, e, 'Stats'); }
+});
+
 // Logs
 app.get('/api/logs', (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 100), 200);
+    const limit = Math.max(1, parseInt(req.query.limit, 10) || 10000);
     const offset = req.query.offset !== undefined 
       ? Math.max(0, parseInt(req.query.offset, 10) || 0) 
       : (page - 1) * limit;
@@ -417,6 +441,148 @@ app.post('/api/trails/toggle', requireAuth, requireSelf, (req, res) => {
     res.json({ success: true, trails });
     broadcastUserUpdate(username);
   } catch (e) { safeError(res, e, 'TrailToggle'); }
+});
+
+// ── Auto-vote targets (vote directly on any author's new posts) ──────────────
+const autoVotePayload = (username) => ({ targets: getAutoVoteTargets(username), ...getAutoVoteActivity(username, 50) });
+
+app.get('/api/autovote/:username', requireAuth, (req, res) => {
+  try {
+    const username = (req.params.username || '').toLowerCase();
+    if (req.authUser !== username) return res.status(403).json({ success: false, error: 'You can only view your own account.' });
+    res.json({ success: true, ...autoVotePayload(username) });
+  } catch (e) { safeError(res, e, 'AutoVoteGet'); }
+});
+
+app.post('/api/autovote/add', requireAuth, requireSelf, async (req, res) => {
+  try {
+    const { username, targetAuthor, weight = 100, delay = 0, minVp = 80, maxDailyVotes = 0 } = req.body;
+    if (typeof targetAuthor !== 'string' || !isValidSteemUsername(targetAuthor.replace(/^@/, ''))) {
+      return res.status(400).json({ success: false, error: 'Valid author name required.' });
+    }
+    const cleanUser   = username.trim().toLowerCase();
+    const cleanAuthor = targetAuthor.replace(/^@/, '').trim().toLowerCase();
+    if (cleanUser === cleanAuthor) {
+      return res.status(400).json({ success: false, error: 'You cannot auto-vote your own account.' });
+    }
+    if (!(await buildProfile(cleanAuthor))) {
+      return res.status(404).json({ success: false, error: `Account @${cleanAuthor} does not exist on Steem blockchain` });
+    }
+    const targets = addAutoVoteTarget({
+      username: cleanUser,
+      targetAuthor: cleanAuthor,
+      weight: Math.min(100, Math.max(1, parseInt(weight, 10) || 100)),
+      delay: Math.min(60, Math.max(0, parseInt(delay, 10) || 0)),
+      minVp: Math.min(99, Math.max(10, parseInt(minVp, 10) || 80)),
+      maxDailyVotes: Math.max(0, parseInt(maxDailyVotes, 10) || 0)
+    });
+    refreshWatched();
+    res.json({ success: true, message: `Now auto-voting @${cleanAuthor}'s new posts`, targets, ...getAutoVoteActivity(cleanUser, 50) });
+  } catch (e) { safeError(res, e, 'AutoVoteAdd'); }
+});
+
+app.post('/api/autovote/update', requireAuth, requireSelf, (req, res) => {
+  try {
+    const { id, username, weight, delay, minVp, maxDailyVotes, status } = req.body;
+    if (!id) return res.status(400).json({ success: false, error: 'Target ID required' });
+    if (status !== undefined && !VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` });
+    }
+    const targets = updateAutoVoteTarget({
+      id: parseInt(id, 10),
+      username,
+      weight: weight !== undefined ? Math.min(100, Math.max(1, parseInt(weight, 10) || 100)) : undefined,
+      delay: delay !== undefined ? Math.min(60, Math.max(0, parseInt(delay, 10) || 0)) : undefined,
+      minVp: minVp !== undefined ? Math.min(99, Math.max(10, parseInt(minVp, 10) || 80)) : undefined,
+      maxDailyVotes: maxDailyVotes !== undefined ? Math.max(0, parseInt(maxDailyVotes, 10) || 0) : undefined,
+      status: status || undefined
+    });
+    if (!targets) return res.status(404).json({ success: false, error: 'Target not found' });
+    refreshWatched();
+    res.json({ success: true, targets });
+  } catch (e) { safeError(res, e, 'AutoVoteUpdate'); }
+});
+
+app.post('/api/autovote/remove', requireAuth, requireSelf, (req, res) => {
+  try {
+    const { id, username } = req.body;
+    if (!id) return res.status(400).json({ success: false, error: 'Target ID required' });
+    const targets = deleteAutoVoteTarget({ id: parseInt(id, 10), username });
+    refreshWatched();
+    res.json({ success: true, message: 'Target removed', targets });
+  } catch (e) { safeError(res, e, 'AutoVoteRemove'); }
+});
+
+// ── Settings: Auto Redeem (auto-claim rewards) ───────────────────────────────
+const REDEEM_INTERVALS = [6, 12, 24, 48, 72, 168];
+const lastManualClaim = new Map();
+
+app.get('/api/settings/redeem/:username', requireAuth, async (req, res) => {
+  try {
+    const username = (req.params.username || '').toLowerCase();
+    if (req.authUser !== username) return res.status(403).json({ success: false, error: 'You can only view your own account.' });
+    const [acc, globals] = await Promise.all([
+      getAccount(username),
+      getCachedGlobals().catch(() => null),
+    ]);
+    const vests = acc?.reward_vesting_balance || '0.000000 VESTS';
+    const sp = vestsToSp(vests, globals);
+    const rawLogs = getRedeemLogs(username, 20);
+    const logs = rawLogs.map(l => ({
+      ...l,
+      sp: l.vests ? vestsToSp(l.vests, globals) : '0.000 SP',
+    }));
+    res.json({
+      success: true,
+      settings: getAutoRedeem(username),
+      logs,
+      pending: acc ? {
+        steem: acc.reward_steem_balance,
+        sbd: acc.reward_sbd_balance,
+        vests: acc.reward_vesting_balance,
+        sp,
+      } : null,
+    });
+  } catch (e) { safeError(res, e, 'RedeemGet'); }
+});
+
+app.post('/api/settings/redeem/save', requireAuth, requireSelf, (req, res) => {
+  try {
+    const { username, enabled, intervalHours } = req.body;
+    const hrs = parseInt(intervalHours, 10);
+    if (!REDEEM_INTERVALS.includes(hrs)) {
+      return res.status(400).json({ success: false, error: `Interval must be one of: ${REDEEM_INTERVALS.join(', ')} hours` });
+    }
+    const settings = saveAutoRedeem({ username, enabled: !!enabled, intervalHours: hrs });
+    res.json({ success: true, settings, message: enabled ? 'Auto redeem enabled' : 'Auto redeem disabled' });
+  } catch (e) { safeError(res, e, 'RedeemSave'); }
+});
+
+app.post('/api/settings/redeem/claim', requireAuth, requireSelf, async (req, res) => {
+  try {
+    const username = req.body.username.trim().toLowerCase();
+    const last = lastManualClaim.get(username) || 0;
+    if (Date.now() - last < 30_000) {
+      return res.status(429).json({ success: false, error: 'Please wait a few seconds before claiming again.' });
+    }
+    lastManualClaim.set(username, Date.now());
+    const [result, globals] = await Promise.all([
+      redeemNow(username, 'manual'),
+      getCachedGlobals().catch(() => null),
+    ]);
+    const rawLogs = getRedeemLogs(username, 20);
+    const logs = rawLogs.map(l => ({
+      ...l,
+      sp: l.vests ? vestsToSp(l.vests, globals) : '0.000 SP',
+    }));
+    res.json({ ...result, settings: getAutoRedeem(username), logs });
+  } catch (e) { safeError(res, e, 'RedeemClaim'); }
+});
+
+// ── Settings: RPC node & bridge in use (read-only, server-wide) ──────────────
+app.get('/api/settings/nodes', requireAuth, (req, res) => {
+  const { active, autoFailover } = getNodeConfig();
+  res.json({ success: true, active, autoFailover, bridge: getBridgeStatus() });
 });
 
 // 5. Global user account pause / resume

@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
+import { getSystemState, setSystemState } from './db.js';
 
 import ecc from 'steem/lib/auth/ecc/index.js';
 const { Signature } = ecc.default || ecc;
@@ -8,20 +9,113 @@ export const BOT_ACCOUNT    = (process.env.BOT_ACCOUNT    || '').toLowerCase();
 export const BOT_POSTING_KEY = (process.env.BOT_POSTING_KEY || '').trim();
 export const TRAIL_LEADER    = (process.env.TRAIL_LEADER   || 'dhaka.witness').toLowerCase().trim();
 
-// ── Steem RPC nodes (with automated failover) ─────────────────────────────────
-const NODES = [
+// ── Steem RPC nodes (with automated failover, custom nodes & pinning) ─────────
+export const DEFAULT_NODES = [
+  'https://api.moecki.online',
   'https://api.steemit.com',
   'https://api.justyy.com',
   'https://api.steem.fans',
   'https://steem.justyy.com',
 ];
+let NODES = [...DEFAULT_NODES];
+let customNodes = [];
+let autoFailover = true;
 let ni = 0;
 export const node = () => NODES[ni];
-export const rotate = () => { ni = (ni + 1) % NODES.length; };
+export const rotate = () => { if (autoFailover && NODES.length > 1) ni = (ni + 1) % NODES.length; };
+
+const rebuildNodes = (activeUrl) => {
+  NODES = [...DEFAULT_NODES, ...customNodes.filter(u => !DEFAULT_NODES.includes(u))];
+  const idx = NODES.indexOf(activeUrl);
+  ni = idx >= 0 ? idx : 0;
+  if (_steem) _steem.api.setOptions({ url: node() });
+};
+
+const persistNodes = () => {
+  setSystemState('custom_nodes', JSON.stringify(customNodes));
+  setSystemState('active_node', node());
+  setSystemState('node_failover', autoFailover ? '1' : '0');
+};
+
+/** Load persisted node settings (call after initDb). */
+export function initNodes() {
+  try {
+    customNodes = JSON.parse(getSystemState('custom_nodes') || '[]').filter(u => typeof u === 'string');
+  } catch { customNodes = []; }
+  autoFailover = getSystemState('node_failover') !== '0';
+  const savedActive = getSystemState('active_node');
+  const target = (savedActive && savedActive !== 'https://api.steemit.com') ? savedActive : DEFAULT_NODES[0];
+  rebuildNodes(target);
+  console.log(`[Nodes] Active: ${node()} (failover ${autoFailover ? 'on' : 'off'}, ${customNodes.length} custom)`);
+}
+
+export function getNodeConfig() {
+  return {
+    active: node(),
+    autoFailover,
+    nodes: NODES.map(url => ({ url, custom: !DEFAULT_NODES.includes(url) })),
+  };
+}
+
+/** Validate a user-supplied node URL (http/https, no loopback/private hosts). */
+export function normalizeNodeUrl(raw) {
+  let u;
+  try { u = new URL(String(raw).trim()); } catch { return null; }
+  if (!['https:', 'http:'].includes(u.protocol)) return null;
+  const h = u.hostname.toLowerCase();
+  if (
+    h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') ||
+    /^(127|10)\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^169\.254\./.test(h) || h === '0.0.0.0' || h.startsWith('[')
+  ) return null;
+  return u.origin + (u.pathname !== '/' ? u.pathname.replace(/\/$/, '') : '');
+}
+
+export function addCustomNode(url) {
+  if (!NODES.includes(url)) { customNodes.push(url); rebuildNodes(node()); persistNodes(); }
+  return getNodeConfig();
+}
+
+export function removeCustomNode(url) {
+  if (DEFAULT_NODES.includes(url)) return null;
+  const wasActive = node() === url;
+  customNodes = customNodes.filter(u => u !== url);
+  rebuildNodes(wasActive ? DEFAULT_NODES[0] : node());
+  persistNodes();
+  return getNodeConfig();
+}
+
+export function setActiveNode(url, failover) {
+  if (!NODES.includes(url)) return null;
+  ni = NODES.indexOf(url);
+  if (typeof failover === 'boolean') autoFailover = failover;
+  if (_steem) _steem.api.setOptions({ url: node() });
+  persistNodes();
+  return getNodeConfig();
+}
+
+/** Probe a node: returns latency + head block, or error. */
+export async function testNode(url) {
+  const t0 = Date.now();
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'condenser_api.get_dynamic_global_properties', params: [] }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const j = await r.json();
+    if (j.error || !j.result?.head_block_number) throw new Error(j.error?.message || 'Not a Steem node');
+    return { ok: true, latency: Date.now() - t0, headBlock: j.result.head_block_number };
+  } catch (e) {
+    return { ok: false, error: e.name === 'TimeoutError' ? 'Timed out' : (e.message || 'Unreachable') };
+  }
+}
 
 // ── Raw JSON-RPC call ─────────────────────────────────────────────────────────
 export async function rpc(method, params = []) {
-  for (let t = 0; t < NODES.length; t++) {
+  const attempts = autoFailover ? NODES.length : 2;
+  for (let t = 0; t < attempts; t++) {
     try {
       const r = await fetch(node(), {
         method: 'POST',
@@ -36,7 +130,7 @@ export async function rpc(method, params = []) {
       rotate();
     }
   }
-  throw new Error('All Steem RPC nodes failed');
+  throw new Error(autoFailover ? 'All Steem RPC nodes failed' : `Pinned node ${node()} failed (failover disabled)`);
 }
 
 // ── Account ───────────────────────────────────────────────────────────────────
@@ -92,9 +186,44 @@ export function formatRep(raw) {
   return Math.max(0, Math.floor(sign < 0 ? 50 - v : v));
 }
 
-// ── Head block info ───────────────────────────────────────────────────────────
+// ── Head block info & Steem Power (SP) Conversion ─────────────────────────────
 export async function getGlobals() {
   return rpc('condenser_api.get_dynamic_global_properties', []);
+}
+
+let _cachedGlobals = null;
+let _cachedGlobalsTime = 0;
+
+export async function getCachedGlobals(maxAgeMs = 60_000) {
+  const now = Date.now();
+  if (_cachedGlobals && (now - _cachedGlobalsTime < maxAgeMs)) {
+    return _cachedGlobals;
+  }
+  try {
+    const g = await getGlobals();
+    if (g && g.total_vesting_fund_steem && g.total_vesting_shares) {
+      _cachedGlobals = g;
+      _cachedGlobalsTime = now;
+      return _cachedGlobals;
+    }
+  } catch (err) {
+    // Return cached value if available on error
+  }
+  return _cachedGlobals;
+}
+
+/**
+ * Convert VESTS string or number to Steem Power (SP) string (e.g. '28.472 SP').
+ * Uses live dynamic global properties or fallback Steem blockchain ratio.
+ */
+export function vestsToSp(vests, globals = null) {
+  const v = typeof vests === 'string' ? parseFloat(vests) : Number(vests);
+  if (!v || isNaN(v) || v <= 0) return '0.000 SP';
+  const g = globals || _cachedGlobals;
+  const fund = parseFloat(g?.total_vesting_fund_steem) || 201780397;
+  const shares = parseFloat(g?.total_vesting_shares) || 325261996680;
+  const sp = v * (fund / shares);
+  return `${sp.toFixed(3)} SP`;
 }
 
 // ── Fetch complete Block with Transactions & Operations ───────────────────────
@@ -116,6 +245,15 @@ export async function getActiveVotes(author, permlink) {
     return Array.isArray(votes) ? votes : [];
   } catch (err) {
     return [];
+  }
+}
+
+// ── Fetch a post's content (used to tell new posts from edits) ───────────────
+export async function getContent(author, permlink) {
+  try {
+    return await rpc('condenser_api.get_content', [author, permlink]);
+  } catch (err) {
+    return null;
   }
 }
 
@@ -231,6 +369,48 @@ export async function voteOnBehalf({ voter, author, permlink, weight }) {
   }
 
   return { success: false, error: lastError || 'Broadcast failed across all RPC nodes' };
+}
+
+/**
+ * Claim all pending rewards for `account` using the bot's posting key
+ * (claim_reward_balance is a posting-authority operation).
+ * Returns { success, claimed: false } when there is nothing to claim.
+ */
+export async function claimRewardsOnBehalf(account) {
+  const key = (BOT_POSTING_KEY || '').trim().replace(/^['"]/, '').replace(/['"]$/, '');
+  if (!key) return { success: false, error: 'BOT_POSTING_KEY not configured in .env' };
+
+  const s = await steemJs();
+  if (!s.auth.isWif(key)) return { success: false, error: 'Invalid BOT_POSTING_KEY in .env' };
+
+  const acc = await getAccount(account);
+  if (!acc) return { success: false, error: 'Account not found on blockchain' };
+
+  const steem = acc.reward_steem_balance || '0.000 STEEM';
+  const sbd   = acc.reward_sbd_balance   || '0.000 SBD';
+  const vests = acc.reward_vesting_balance || '0.000000 VESTS';
+  const globals = await getCachedGlobals().catch(() => null);
+  const sp    = vestsToSp(vests, globals);
+  const pending = { steem, sbd, vests, sp };
+  if (parseFloat(steem) <= 0 && parseFloat(sbd) <= 0 && parseFloat(vests) <= 0) {
+    return { success: true, claimed: false, ...pending };
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt < (autoFailover ? NODES.length : 2); attempt++) {
+    s.api.setOptions({ url: node() });
+    const res = await new Promise((resolve) => {
+      s.broadcast.claimRewardBalance(key, account, steem, sbd, vests, (err, result) => {
+        resolve(err ? { success: false, error: err.message || String(err) } : { success: true, txId: result?.id });
+      });
+    });
+    if (res.success) return { success: true, claimed: true, txId: res.txId, ...pending };
+    lastError = res.error;
+    if ((lastError || '').includes('authority')) break;
+    rotate();
+    await new Promise(r => setTimeout(r, 400));
+  }
+  return { success: false, error: lastError || 'Claim failed', ...pending };
 }
 
 /**
