@@ -922,7 +922,8 @@ function DashboardStats({ logs, status, trails, username }) {
   }, [username]);
 
   // Totals — prefer server stats, fall back to log-derived counts
-  const totalSuccess = stats?.breakdown?.success ?? status?.totalVotes ?? 0;
+  // NOTE: never fall back to status.totalVotes — that is the app-wide count, not this user's
+  const totalSuccess = stats?.breakdown?.success ?? 0;
   const totalFailed  = stats?.breakdown?.failed  ?? logs.filter(l => l.status === 'FAILED').length;
   const totalSkipped = stats?.breakdown?.skipped ?? logs.filter(l => l.status?.startsWith('SKIPPED')).length;
   const totalAll     = stats?.breakdown?.total   ?? (totalSuccess + totalFailed + totalSkipped);
@@ -2810,7 +2811,8 @@ export default function App() {
 
   // Initial load + WS connection + auth expiration listener
   useEffect(() => {
-    loadDataOnce();
+    // Pass the saved username so the initial logs fetch is user-scoped
+    loadDataOnce(localStorage.getItem(SESSION_STORAGE_KEY) || undefined);
     connectWs();
 
     const onAuthExpired = () => {
@@ -2833,6 +2835,11 @@ export default function App() {
     localStorage.setItem(SESSION_STORAGE_KEY, user.username);
     if (token) localStorage.setItem(JWT_STORAGE_KEY, token);
     setSessionRestored(true);
+    // Immediately load this user's vote logs (don't wait for the next WS broadcast)
+    setLogs([]);
+    api(`/logs?user=${user.username}`)
+      .then(res => { if (res?.success && !loggedOutRef.current) setLogs(res.logs || []); })
+      .catch(() => {});
     // Subscribe WebSocket to this user's updates
     if (wsRef.current && wsRef.current.readyState === 1) {
       wsRef.current.send(JSON.stringify({ type: 'subscribe', username: user.username }));
@@ -2846,6 +2853,7 @@ export default function App() {
     setCurrentUser(null);
     setSteemProfile(null);
     setTrails([]);
+    setLogs([]); // Don't leak the previous user's logs to the next login
   };
 
   const botAccount = status?.botAccount || 'votebd';

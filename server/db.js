@@ -510,10 +510,10 @@ export function getDashboardStats(tzOffsetMin = 0, username = null) {
   // Overall vote status breakdown
   const breakdown = db.prepare(`
     SELECT
-      SUM(CASE WHEN status = 'SUCCESS'            THEN 1 ELSE 0 END) as success,
-      SUM(CASE WHEN status = 'FAILED'             THEN 1 ELSE 0 END) as failed,
-      SUM(CASE WHEN status LIKE 'SKIPPED%'        THEN 1 ELSE 0 END) as skipped,
-      COUNT(*)                                                       as total
+      COALESCE(SUM(CASE WHEN status = 'SUCCESS'     THEN 1 ELSE 0 END), 0) as success,
+      COALESCE(SUM(CASE WHEN status = 'FAILED'      THEN 1 ELSE 0 END), 0) as failed,
+      COALESCE(SUM(CASE WHEN status LIKE 'SKIPPED%' THEN 1 ELSE 0 END), 0) as skipped,
+      COUNT(*)                                                             as total
     FROM vote_logs
     WHERE 1=1 ${userFilter}
   `).get(userParam) || { success: 0, failed: 0, skipped: 0, total: 0 };
