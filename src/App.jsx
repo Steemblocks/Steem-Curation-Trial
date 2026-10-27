@@ -2588,16 +2588,42 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, wsS
                     <ChevronLeft size={14} />
                   </button>
 
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
-                    <button
-                      key={pageNum}
-                      type="button"
-                      className={`page-btn ${pageNum === validPage ? 'active' : ''}`}
-                      onClick={() => setCurrentPage(pageNum)}
-                    >
-                      {pageNum}
-                    </button>
-                  ))}
+                  {(() => {
+                    const pages = [];
+                    const sibling = 1; // pages on each side of current
+                    const left  = Math.max(2, validPage - sibling);
+                    const right = Math.min(totalPages - 1, validPage + sibling);
+
+                    // Always show page 1
+                    pages.push(1);
+
+                    // Left ellipsis
+                    if (left > 2) pages.push('left-dots');
+
+                    // Range around current page
+                    for (let i = left; i <= right; i++) pages.push(i);
+
+                    // Right ellipsis
+                    if (right < totalPages - 1) pages.push('right-dots');
+
+                    // Always show last page (if > 1)
+                    if (totalPages > 1) pages.push(totalPages);
+
+                    return pages.map((p) =>
+                      typeof p === 'string' ? (
+                        <span key={p} className="page-ellipsis">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          type="button"
+                          className={`page-btn ${p === validPage ? 'active' : ''}`}
+                          onClick={() => setCurrentPage(p)}
+                        >
+                          {p}
+                        </button>
+                      )
+                    );
+                  })()}
 
                   <button
                     type="button"

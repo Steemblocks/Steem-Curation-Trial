@@ -632,6 +632,18 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: not-allowed;
 }
 
+.page-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  letter-spacing: 1px;
+  user-select: none;
+}
+
 /* ── Dashboard Stats ─────────────────────────────────────────────────────────── */
 
 /* Stat cards row */
