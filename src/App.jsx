@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Shield, 
   Key, 
@@ -889,6 +889,27 @@ function StatCard({ icon: Icon, iconBg, iconColor, value, label, sub }) {
 
 // ── Date helpers ── SQLite stores UTC as "YYYY-MM-DD HH:MM:SS" (no 'T', no zone)
 const parseSqlTs = (ts) => (ts ? new Date(String(ts).replace(' ', 'T') + 'Z') : null);
+
+/**
+ * Merge a batch of recent logs into the existing list by id.
+ * Returns the SAME array reference when nothing changed, so React skips re-rendering.
+ */
+const mergeLogs = (prev, incoming) => {
+  if (!Array.isArray(incoming) || incoming.length === 0) return prev;
+  const byId = new Map(prev.map(l => [l.id, l]));
+  const fresh = [];
+  let changed = false;
+  for (const l of incoming) {
+    const old = byId.get(l.id);
+    if (!old) { fresh.push(l); changed = true; }
+    else if (old.status !== l.status || old.error !== l.error || old.tx_id !== l.tx_id) {
+      byId.set(l.id, l); changed = true;
+    }
+  }
+  if (!changed) return prev;
+  fresh.sort((a, b) => b.id - a.id);
+  return [...fresh, ...prev.map(l => byId.get(l.id))];
+};
 // Local calendar date as YYYY-MM-DD (toISOString() would give the UTC date)
 const localDateStr = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -1886,11 +1907,42 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, wsS
   const [isRefreshing, setIsRefreshing] = useState(false);
   const logsPerPage = 10;
 
-  const totalLogs = logs.length;
+  // When the user is browsing an older page, freeze the list at the newest id they
+  // saw so incoming votes don't shift rows under them. On page 1 it updates live.
+  const [anchorId, setAnchorId] = useState(null);
+  useEffect(() => {
+    if (currentPage === 1) setAnchorId(null);
+    else setAnchorId(prev => prev ?? (logs[0]?.id ?? null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage]);
+  const visibleLogs = useMemo(
+    () => (anchorId == null ? logs : logs.filter(l => l.id <= anchorId)),
+    [logs, anchorId]
+  );
+  const pendingNewCount = logs.length - visibleLogs.length;
+
+  // Briefly highlight rows that arrived live (not on first load)
+  const seenIdsRef = React.useRef(null);
+  const [newIds, setNewIds] = useState(() => new Set());
+  useEffect(() => {
+    const ids = new Set(logs.map(l => l.id));
+    if (seenIdsRef.current && seenIdsRef.current.size > 0) {
+      const added = logs.filter(l => !seenIdsRef.current.has(l.id)).map(l => l.id);
+      if (added.length && added.length < 100) {
+        setNewIds(prev => new Set([...prev, ...added]));
+        setTimeout(() => {
+          setNewIds(prev => { const n = new Set(prev); added.forEach(id => n.delete(id)); return n; });
+        }, 2500);
+      }
+    }
+    seenIdsRef.current = ids;
+  }, [logs]);
+
+  const totalLogs = visibleLogs.length;
   const totalPages = Math.max(1, Math.ceil(totalLogs / logsPerPage));
   const validPage = Math.min(currentPage, totalPages);
   const startIndex = (validPage - 1) * logsPerPage;
-  const currentLogs = logs.slice(startIndex, startIndex + logsPerPage);
+  const currentLogs = visibleLogs.slice(startIndex, startIndex + logsPerPage);
 
   const handleRefreshClick = async () => {
     setIsRefreshing(true);
@@ -2510,6 +2562,17 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, wsS
           </div>
 
           <div className="header-actions" style={{ gap: '0.5rem' }}>
+            {pendingNewCount > 0 && (
+              <button
+                type="button"
+                id="show-new-votes-btn"
+                className="new-votes-pill"
+                onClick={() => setCurrentPage(1)}
+                title="Jump to the latest votes"
+              >
+                {pendingNewCount} new vote{pendingNewCount !== 1 ? 's' : ''} ↑
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-secondary btn-sm"
@@ -2543,7 +2606,7 @@ function DashboardView({ user, steemProfile, trails = [], logs = [], status, wsS
                 </thead>
                 <tbody>
                   {currentLogs.map((log) => (
-                    <tr key={log.id}>
+                    <tr key={log.id} className={newIds.has(log.id) ? 'log-row-new' : undefined}>
                       <td>
                         <span style={{ fontWeight: '600' }}>@{log.leader}</span>
                       </td>
@@ -2783,6 +2846,10 @@ export default function App() {
             break;
           case 'logs':
             setLogs(msg.data || []);
+            break;
+          case 'logs_recent':
+            // Incremental update: merge by id so only new/changed rows re-render
+            setLogs(prev => mergeLogs(prev, msg.data));
             break;
           case 'user': {
             const d = msg.data;

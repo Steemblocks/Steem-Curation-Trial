@@ -161,11 +161,13 @@ function broadcastStatusAndLogs() {
       totalVotes: stats.totalVotes,
     });
 
-    // Send user-specific logs to each subscribed user
+    // Send each subscribed user only their most recent logs. The client merges these
+    // by id into the full history it fetched over HTTP, so only new/changed rows update
+    // (instead of replacing the entire list every tick).
     const activeUsers = getSubscribedUsers();
     activeUsers.forEach(u => {
-      const userLogs = getVoteLogs({ limit: 10000, username: u });
-      broadcast('logs', userLogs, u);
+      const recentLogs = getVoteLogs({ limit: 100, username: u });
+      broadcast('logs_recent', recentLogs, u);
       broadcastUserUpdate(u);
     });
   } catch (e) {

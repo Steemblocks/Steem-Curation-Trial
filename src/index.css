@@ -371,6 +371,38 @@ input[type="range"]::-webkit-slider-thumb {
   border-bottom: none;
 }
 
+/* Live-arrived vote rows: slide in + soft green glow that fades out */
+.data-table tr.log-row-new td {
+  animation: logRowIn 2.5s ease-out;
+}
+
+@keyframes logRowIn {
+  0%   { background-color: rgba(16, 185, 129, 0.18); opacity: 0; transform: translateY(-4px); }
+  12%  { opacity: 1; transform: translateY(0); }
+  100% { background-color: transparent; }
+}
+
+/* "N new votes" pill shown while browsing older pages */
+.new-votes-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.15s ease;
+  animation: pulse 2s infinite ease-in-out;
+}
+
+.new-votes-pill:hover {
+  background: rgba(16, 185, 129, 0.22);
+  transform: translateY(-1px);
+}
+
 /* Grid Layout */
 .grid-2col {
   display: grid;

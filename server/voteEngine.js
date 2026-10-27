@@ -1,6 +1,6 @@
 import { getActiveFollowers, logVote, getVoteLogs, getDailyVoteCount, getActiveAutoVoters, hasAutoVoteLog } from './db.js';
 import { getAccount, calcVP, hasBotAuthority, voteOnBehalf, getActiveVotes, BOT_ACCOUNT } from './steemClient.js';
-import { broadcastAll } from './wsHub.js';
+import { broadcast } from './wsHub.js';
 
 const cleanName = (name) => (name || '').toString().replace(/^@/, '').trim().toLowerCase();
 
@@ -323,8 +323,8 @@ async function executeVote({ user, leader, author, permlink, leaderWeight }) {
 function logAndBroadcast(leader, author, permlink, voter, weight, status, error = null, txId = null) {
   try {
     logVote({ leader, author, permlink, voter, weight, status, error, txId });
-    // Push fresh logs over WebSocket immediately
-    broadcastAll('logs', getVoteLogs({ limit: 50, offset: 0 }));
+    // Push only this voter's newest logs to this voter; the client merges them by id
+    broadcast('logs_recent', getVoteLogs({ limit: 20, username: voter }), voter);
   } catch (e) {
     console.error('[VoteEngine] logVote error:', e.message);
   }
