@@ -2711,7 +2711,7 @@ export default function App() {
     try {
       const [statusRes, logsRes] = await Promise.all([
         api('/status').catch(() => null),
-        api('/logs').catch(() => null),
+        api(`/logs${targetUsername ? `?user=${targetUsername}` : ''}`).catch(() => null),
       ]);
 
       if (statusRes?.success) setStatus(statusRes);

@@ -160,11 +160,14 @@ function broadcastStatusAndLogs() {
       activeMembers: stats.activeMembers,
       totalVotes: stats.totalVotes,
     });
-    broadcastAll('logs', getVoteLogs(10000));
 
-    // Push live user profile updates (for Voting Power) to currently subscribed clients
+    // Send user-specific logs to each subscribed user
     const activeUsers = getSubscribedUsers();
-    activeUsers.forEach(u => broadcastUserUpdate(u));
+    activeUsers.forEach(u => {
+      const userLogs = getVoteLogs({ limit: 10000, username: u });
+      broadcast('logs', userLogs, u);
+      broadcastUserUpdate(u);
+    });
   } catch (e) {
     console.error('[WS] broadcastStatusAndLogs error:', e.message);
   }
@@ -207,12 +210,13 @@ app.get('/api/logs', (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.max(1, parseInt(req.query.limit, 10) || 10000);
+    const username = req.query.user ? req.query.user.trim().toLowerCase() : null;
     const offset = req.query.offset !== undefined 
       ? Math.max(0, parseInt(req.query.offset, 10) || 0) 
       : (page - 1) * limit;
 
-    const total = getTotalVoteLogsCount();
-    const logs = getVoteLogs({ limit, offset });
+    const total = getTotalVoteLogsCount(username);
+    const logs = getVoteLogs({ limit, offset, username });
     const totalPages = Math.ceil(total / limit) || 1;
 
     res.json({
