@@ -1,5 +1,5 @@
-# Use an official Node.js runtime as the base image
-FROM node:18-alpine
+# Use Node.js 20 LTS as base image (Node 20.12+ required for Vite / Rolldown styleText)
+FROM node:20-alpine
 
 # Set the working directory in the container
 WORKDIR /app

@@ -27,7 +27,7 @@ A high-performance, real-time Steem curation trail dashboard. This tool allows u
 
 ### 1. Prerequisites
 
-- Node.js (v18+)
+- Node.js (v20+)
 - A Steem bot account and its private posting key.
 
 ### 2. Setup
