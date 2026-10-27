@@ -193,11 +193,11 @@ function VoteStatusBadge({ status, error }) {
   const title = isBlacklist ? undefined : (error || undefined);
   switch (status) {
     case 'SUCCESS':
-      return <span className="badge badge-success" title={title}>✅ Voted</span>;
+      return <span className="badge badge-success" title={title}>Voted</span>;
     case 'SKIPPED_VP':
-      return <span className="badge badge-warning" title={title}> Low VP</span>;
+      return <span className="badge badge-warning" title={title}>Low VP</span>;
     case 'FAILED':
-      return <span className="badge badge-danger" title={title} style={{ cursor: error ? 'help' : 'default' }}>❌ Failed</span>;
+      return <span className="badge badge-danger" title={title} style={{ cursor: error ? 'help' : 'default' }}>Failed</span>;
     case 'SKIPPED_SELF_VOTE':
     case 'SKIPPED_KEYCHAIN':
     case 'SKIPPED_BLACKLIST':
